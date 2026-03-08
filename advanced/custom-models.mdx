@@ -1,0 +1,523 @@
+---
+title: 'Creating Custom Models'
+description: 'Guide to implementing custom models using the Model trait'
+---
+
+## Overview
+
+Custom models allow you to extend Stremio Core with your own stateful components. By implementing the `Model` trait, you can integrate seamlessly with the runtime system and benefit from automatic effect handling, state propagation, and UI updates.
+
+## The Model Trait
+
+The `Model` trait is the foundation for all stateful components:
+
+```rust
+use stremio_core::runtime::{Model, Env, Msg, Effect};
+use serde::{Serialize, Deserialize};
+
+pub trait Model<E: Env>: Clone {
+    type Field: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>);
+    fn update_field(&mut self, msg: &Msg, field: &Self::Field) -> (Vec<Effect>, Vec<Self::Field>);
+}
+```
+
+See src/runtime/update.rs:8
+
+## Manual Implementation
+
+### Step 1: Define Your Model
+
+```rust
+use serde::{Serialize, Deserialize};
+use stremio_core::models::common::Loadable;
+
+#[derive(Clone, Serialize, Debug)]
+pub struct MyCustomModel {
+    pub data: Loadable<Vec<String>, String>,
+    pub filter: Option<String>,
+    pub page: u32,
+}
+
+impl Default for MyCustomModel {
+    fn default() -> Self {
+        Self {
+            data: Loadable::Loading,
+            filter: None,
+            page: 0,
+        }
+    }
+}
+```
+
+### Step 2: Define Field Enum
+
+The `Field` enum represents all mutable fields in your model:
+
+```rust
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum MyCustomModelField {
+    Data,
+    Filter,
+    Page,
+}
+```
+
+### Step 3: Implement the Model Trait
+
+```rust
+use stremio_core::runtime::{Model, Env, Msg, Effect, Effects};
+use stremio_core::runtime::msg::{Action, Internal};
+
+impl<E: Env + 'static> Model<E> for MyCustomModel {
+    type Field = MyCustomModelField;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>) {
+        match msg {
+            Msg::Action(Action::Load(request)) => {
+                // Update state
+                self.data = Loadable::Loading;
+                self.page = 0;
+                
+                // Create effects
+                let effects = Effects::future(EffectFuture::Concurrent(
+                    fetch_data::<E>(request.clone()).boxed_env()
+                ));
+                
+                // Return effects and changed fields
+                let fields = vec![
+                    MyCustomModelField::Data,
+                    MyCustomModelField::Page,
+                ];
+                (effects.into_iter().collect(), fields)
+            }
+            Msg::Internal(Internal::DataLoaded(data)) => {
+                self.data = Loadable::Ready(data.clone());
+                let fields = vec![MyCustomModelField::Data];
+                (vec![], fields)
+            }
+            _ => {
+                // No changes
+                (vec![], vec![])
+            }
+        }
+    }
+
+    fn update_field(&mut self, msg: &Msg, field: &Self::Field) -> (Vec<Effect>, Vec<Self::Field>) {
+        match field {
+            MyCustomModelField::Data => {
+                // Update only the data field
+                match msg {
+                    Msg::Internal(Internal::DataLoaded(data)) => {
+                        self.data = Loadable::Ready(data.clone());
+                        (vec![], vec![MyCustomModelField::Data])
+                    }
+                    _ => (vec![], vec![])
+                }
+            }
+            MyCustomModelField::Filter => {
+                // Update only the filter field
+                match msg {
+                    Msg::Action(Action::UpdateFilter(filter)) => {
+                        self.filter = filter.clone();
+                        (vec![], vec![MyCustomModelField::Filter])
+                    }
+                    _ => (vec![], vec![])
+                }
+            }
+            MyCustomModelField::Page => {
+                (vec![], vec![])
+            }
+        }
+    }
+}
+```
+
+See src/runtime/update.rs:8 for trait definition
+
+## Using the Model Derive Macro
+
+For complex models with multiple fields, use the `#[derive(Model)]` macro:
+
+### Step 1: Enable the Derive Feature
+
+```toml
+[dependencies]
+stremio-core = { version = "*", features = ["derive"] }
+```
+
+### Step 2: Structure Your Model
+
+The model must have a `ctx` field:
+
+```rust
+use stremio_core::Model;
+use stremio_core::models::ctx::Ctx;
+use serde::Serialize;
+
+#[derive(Model, Clone, Serialize)]
+#[model(Env)]  // Specify your Env type
+pub struct MyAppModel {
+    pub ctx: Ctx,
+    pub catalog: CatalogModel,
+    pub player: PlayerModel,
+    pub library: LibraryModel,
+}
+```
+
+See stremio-derive/src/lib.rs:14
+
+### Generated Code
+
+The derive macro generates:
+
+1. **Field enum** with variants for each field
+2. **Model implementation** that coordinates updates across fields
+3. **Automatic effect composition** combining effects from all fields
+
+See stremio-derive/src/lib.rs:113
+
+## Context-Aware Models
+
+Many models need access to user context. Use the `UpdateWithCtx` trait:
+
+```rust
+use stremio_core::runtime::{UpdateWithCtx, Env, Msg, Effects};
+use stremio_core::models::ctx::Ctx;
+
+#[derive(Clone, Serialize)]
+pub struct CatalogModel {
+    pub items: Loadable<Vec<MetaItem>, String>,
+    pub selected_addon: Option<String>,
+}
+
+impl<E: Env + 'static> UpdateWithCtx<E> for CatalogModel {
+    fn update(&mut self, msg: &Msg, ctx: &Ctx) -> Effects {
+        match msg {
+            Msg::Action(Action::Load(request)) => {
+                // Access user's installed addons
+                let addons = &ctx.profile.addons;
+                
+                // Filter by user preferences
+                let auth_key = ctx.profile.auth_key();
+                
+                // Build request with context
+                self.items = Loadable::Loading;
+                Effects::future(EffectFuture::Concurrent(
+                    fetch_catalog::<E>(request, addons, auth_key).boxed_env()
+                ))
+            }
+            _ => Effects::none().unchanged()
+        }
+    }
+}
+```
+
+See src/runtime/update.rs:22 and src/models/catalog_with_filters.rs:149
+
+## Complete Example: Custom Favorites Model
+
+Here's a complete example of a custom favorites model:
+
+```rust
+use serde::{Serialize, Deserialize};
+use stremio_core::runtime::{
+    Model, Env, Msg, Effect, Effects, EffectFuture, EnvFutureExt,
+};
+use stremio_core::runtime::msg::{Action, Internal};
+use stremio_core::types::resource::MetaItemPreview;
+
+// Define custom actions
+#[derive(Clone, Debug)]
+pub enum FavoritesAction {
+    Load,
+    Add(MetaItemPreview),
+    Remove(String),  // ID to remove
+}
+
+// Model state
+#[derive(Clone, Serialize, Debug)]
+pub struct FavoritesModel {
+    pub items: Vec<MetaItemPreview>,
+    pub loading: bool,
+}
+
+impl Default for FavoritesModel {
+    fn default() -> Self {
+        Self {
+            items: vec![],
+            loading: false,
+        }
+    }
+}
+
+// Field enum
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FavoritesField {
+    Items,
+    Loading,
+}
+
+// Helper function to load from storage
+fn load_favorites<E: Env>() -> impl Future<Output = Msg> {
+    E::get_storage::<Vec<MetaItemPreview>>("favorites")
+        .map(|result| match result {
+            Ok(Some(items)) => Msg::Internal(Internal::FavoritesLoaded(items)),
+            _ => Msg::Internal(Internal::FavoritesLoaded(vec![])),
+        })
+}
+
+// Helper function to save to storage
+fn save_favorites<E: Env>(items: Vec<MetaItemPreview>) -> impl Future<Output = Msg> {
+    E::set_storage("favorites", Some(&items))
+        .map(|_| Msg::Event(Event::FavoritesSaved))
+}
+
+// Model implementation
+impl<E: Env + 'static> Model<E> for FavoritesModel {
+    type Field = FavoritesField;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>) {
+        match msg {
+            // Handle custom action (you'd extend Action enum)
+            Msg::Action(Action::Favorites(FavoritesAction::Load)) => {
+                self.loading = true;
+                let effects = Effects::future(EffectFuture::Sequential(
+                    load_favorites::<E>().boxed_env()
+                ));
+                (effects.into_iter().collect(), vec![FavoritesField::Loading])
+            }
+            
+            Msg::Action(Action::Favorites(FavoritesAction::Add(item))) => {
+                if !self.items.iter().any(|i| i.id == item.id) {
+                    self.items.push(item.clone());
+                    let items = self.items.clone();
+                    let effects = Effects::future(EffectFuture::Sequential(
+                        save_favorites::<E>(items).boxed_env()
+                    ));
+                    (effects.into_iter().collect(), vec![FavoritesField::Items])
+                } else {
+                    (vec![], vec![])
+                }
+            }
+            
+            Msg::Action(Action::Favorites(FavoritesAction::Remove(id))) => {
+                self.items.retain(|item| &item.id != id);
+                let items = self.items.clone();
+                let effects = Effects::future(EffectFuture::Sequential(
+                    save_favorites::<E>(items).boxed_env()
+                ));
+                (effects.into_iter().collect(), vec![FavoritesField::Items])
+            }
+            
+            Msg::Internal(Internal::FavoritesLoaded(items)) => {
+                self.items = items.clone();
+                self.loading = false;
+                (
+                    vec![],
+                    vec![FavoritesField::Items, FavoritesField::Loading]
+                )
+            }
+            
+            _ => (vec![], vec![])
+        }
+    }
+
+    fn update_field(&mut self, msg: &Msg, field: &Self::Field) -> (Vec<Effect>, Vec<Self::Field>) {
+        // Delegate to update() for simplicity
+        self.update(msg)
+    }
+}
+```
+
+## Integrating with Runtime
+
+Once your model is defined, integrate it with the runtime:
+
+```rust
+use stremio_core::runtime::Runtime;
+
+// Create your model
+let model = FavoritesModel::default();
+
+// Initialize with load effect
+let initial_effects = vec![
+    Effect::Msg(Box::new(Msg::Action(
+        Action::Favorites(FavoritesAction::Load)
+    )))
+];
+
+// Create runtime
+let (runtime, mut rx) = Runtime::<MyEnv, FavoritesModel>::new(
+    model,
+    initial_effects,
+    100,  // buffer size
+);
+
+// Dispatch actions
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Favorites(FavoritesAction::Add(item)),
+});
+
+// Listen for state changes
+tokio::spawn(async move {
+    while let Some(event) = rx.next().await {
+        match event {
+            RuntimeEvent::NewState(fields, model) => {
+                println!("Updated fields: {:?}", fields);
+                println!("New state: {:?}", model);
+            }
+            RuntimeEvent::CoreEvent(event) => {
+                println!("Core event: {:?}", event);
+            }
+        }
+    }
+});
+```
+
+See src/runtime/runtime.rs:39
+
+## Testing Custom Models
+
+Test your models with the test environment:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stremio_core::unit_tests::TestEnv;
+
+    #[test]
+    fn test_add_favorite() {
+        let mut model = FavoritesModel::default();
+        let item = MetaItemPreview {
+            id: "tt123".to_string(),
+            name: "Test Movie".to_string(),
+            // ... other fields
+        };
+        
+        let (effects, fields) = model.update(&Msg::Action(
+            Action::Favorites(FavoritesAction::Add(item.clone()))
+        ));
+        
+        assert_eq!(model.items.len(), 1);
+        assert_eq!(fields, vec![FavoritesField::Items]);
+        assert_eq!(effects.len(), 1);  // Save effect
+    }
+
+    #[test]
+    fn test_remove_favorite() {
+        let mut model = FavoritesModel {
+            items: vec![MetaItemPreview {
+                id: "tt123".to_string(),
+                name: "Test Movie".to_string(),
+                // ...
+            }],
+            loading: false,
+        };
+        
+        let (effects, fields) = model.update(&Msg::Action(
+            Action::Favorites(FavoritesAction::Remove("tt123".to_string()))
+        ));
+        
+        assert_eq!(model.items.len(), 0);
+        assert_eq!(fields, vec![FavoritesField::Items]);
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep Models Simple">
+    Each model should have a clear, single responsibility. Compose complex models from simpler ones.
+  </Accordion>
+
+  <Accordion title="Use Type-Safe Actions">
+    Define custom action enums for your model instead of using strings or generic types.
+  </Accordion>
+
+  <Accordion title="Handle All Message Types">
+    Always include a catch-all pattern that returns empty effects and fields for unhandled messages.
+  </Accordion>
+
+  <Accordion title="Minimize Clones">
+    Use `Arc<T>` for large data structures that are frequently cloned across messages.
+  </Accordion>
+
+  <Accordion title="Separate Concerns">
+    Keep business logic in helper functions. The `update` method should focus on state transitions.
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Resource Loading Pattern
+
+```rust
+impl<E: Env> Model<E> for MyModel {
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>) {
+        match msg {
+            Msg::Action(Action::Load(request)) => {
+                self.data = Loadable::Loading;
+                (fetch_effects(request), vec![Field::Data])
+            }
+            Msg::Internal(Internal::LoadSuccess(data)) => {
+                self.data = Loadable::Ready(data.clone());
+                (vec![], vec![Field::Data])
+            }
+            Msg::Internal(Internal::LoadError(err)) => {
+                self.data = Loadable::Err(err.clone());
+                (vec![], vec![Field::Data])
+            }
+            _ => (vec![], vec![])
+        }
+    }
+}
+```
+
+See src/models/common/loadable.rs:5
+
+### Pagination Pattern
+
+```rust
+impl<E: Env> Model<E> for PaginatedModel {
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>) {
+        match msg {
+            Msg::Action(Action::LoadNextPage) => {
+                if self.has_next_page && !self.loading {
+                    self.page += 1;
+                    self.loading = true;
+                    (fetch_page_effects(self.page), vec![Field::Page, Field::Loading])
+                } else {
+                    (vec![], vec![])
+                }
+            }
+            Msg::Internal(Internal::PageLoaded(items)) => {
+                self.items.extend(items.clone());
+                self.loading = false;
+                self.has_next_page = !items.is_empty();
+                (vec![], vec![Field::Items, Field::Loading])
+            }
+            _ => (vec![], vec![])
+        }
+    }
+}
+```
+
+See src/models/catalog_with_filters.rs:191
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="State Management" icon="diagram-project" href="/advanced/state-management">
+    Deep dive into state management patterns
+  </Card>
+  <Card title="Environment Trait" icon="globe" href="/core-concepts/environment">
+    Learn about the Env trait for side effects
+  </Card>
+</CardGroup>

@@ -1,0 +1,384 @@
+---
+title: 'LibraryWithFilters'
+description: 'Model for browsing the user library with filtering and sorting'
+---
+
+## Overview
+
+The `LibraryWithFilters` model provides a filtered and sorted view of the user's library. It supports filtering by content type, sorting by various criteria, and pagination. The model is generic over a filter type that determines which library items are included.
+
+## Structure
+
+### Fields
+
+<ResponseField name="selected" type="Option<Selected>">
+  Currently selected filters and sort options
+</ResponseField>
+
+<ResponseField name="selectable" type="Selectable" required>
+  Available filter and sort options
+</ResponseField>
+
+<ResponseField name="catalog" type="Vec<LibraryItem>" required>
+  Filtered, sorted, and paginated library items
+</ResponseField>
+
+<ResponseField name="filter" type="PhantomData<F>">
+  Phantom data for the filter type parameter
+</ResponseField>
+
+## Selected
+
+Represents the current selection state:
+
+<CodeGroup>
+```rust Selected
+pub struct Selected {
+    pub request: LibraryRequest,
+}
+```
+</CodeGroup>
+
+## LibraryRequest
+
+<CodeGroup>
+```rust LibraryRequest
+pub struct LibraryRequest {
+    pub r#type: Option<String>,
+    pub sort: Sort,
+    pub page: LibraryRequestPage,
+}
+```
+</CodeGroup>
+
+<ResponseField name="type" type="Option<String>">
+  Content type filter ("movie", "series", etc.). `None` means all types.
+</ResponseField>
+
+<ResponseField name="sort" type="Sort" required>
+  Sort order for library items (default: `LastWatched`)
+</ResponseField>
+
+<ResponseField name="page" type="LibraryRequestPage" required>
+  Current page number (starts at 1)
+</ResponseField>
+
+## Sort
+
+Available sorting options:
+
+<CodeGroup>
+```rust Sort
+pub enum Sort {
+    LastWatched,    // Most recently watched first (default)
+    Name,           // Alphabetical A-Z
+    NameReverse,    // Alphabetical Z-A
+    TimesWatched,   // Most watched first
+    Watched,        // Watched items first, then unwatched
+    NotWatched,     // Unwatched items first, then watched
+}
+```
+</CodeGroup>
+
+### Sort Behavior
+
+<AccordionGroup>
+  <Accordion title="LastWatched">
+    Sorts by `state.last_watched` in descending order. Most recently watched items appear first.
+    
+    **Source**: `src/models/library_with_filters.rs:69`
+  </Accordion>
+
+  <Accordion title="Name">
+    Sorts alphabetically by item name (case-insensitive), A to Z.
+    
+    **Source**: `src/models/library_with_filters.rs:89`
+  </Accordion>
+
+  <Accordion title="NameReverse">
+    Sorts alphabetically by item name (case-insensitive), Z to A.
+    
+    **Source**: `src/models/library_with_filters.rs:90`
+  </Accordion>
+
+  <Accordion title="TimesWatched">
+    Sorts by `state.times_watched` in descending order. Most watched items appear first.
+    
+    **Source**: `src/models/library_with_filters.rs:70`
+  </Accordion>
+
+  <Accordion title="Watched">
+    Watched items first (by `watched()` status), then unwatched. Within each group, sorted by `last_watched` descending, with `ctime` as fallback.
+    
+    **Source**: `src/models/library_with_filters.rs:73`
+  </Accordion>
+
+  <Accordion title="NotWatched">
+    Unwatched items first, then watched. Within each group, sorted by `last_watched` ascending, with `ctime` as fallback.
+    
+    **Source**: `src/models/library_with_filters.rs:81`
+  </Accordion>
+</AccordionGroup>
+
+## Selectable
+
+Provides available options:
+
+<CodeGroup>
+```rust Selectable
+pub struct Selectable {
+    pub types: Vec<SelectableType>,
+    pub sorts: Vec<SelectableSort>,
+    pub next_page: Option<SelectablePage>,
+}
+```
+</CodeGroup>
+
+<ResponseField name="types" type="Vec<SelectableType>" required>
+  Available content types found in the filtered library
+</ResponseField>
+
+<ResponseField name="sorts" type="Vec<SelectableSort>" required>
+  All available sort options with selection state
+</ResponseField>
+
+<ResponseField name="next_page" type="Option<SelectablePage>">
+  Request for next page if more items are available
+</ResponseField>
+
+## LibraryFilter
+
+The generic parameter `F` must implement the `LibraryFilter` trait:
+
+<CodeGroup>
+```rust LibraryFilter
+pub trait LibraryFilter {
+    fn predicate(library_item: &LibraryItem, notifications: &NotificationsBucket) -> bool;
+}
+```
+</CodeGroup>
+
+### Built-in Filters
+
+#### ContinueWatchingFilter
+
+Includes items that are in progress or have notifications:
+
+<CodeGroup>
+```rust ContinueWatchingFilter
+impl LibraryFilter for ContinueWatchingFilter {
+    fn predicate(library_item: &LibraryItem, notifications: &NotificationsBucket) -> bool {
+        library_item.is_in_continue_watching() || 
+        notifications.items.get(&library_item.id).filter(|n| !n.is_empty()).is_some()
+    }
+}
+```
+</CodeGroup>
+
+Use this filter for "Continue Watching" sections.
+
+#### NotRemovedFilter
+
+Includes all items that have not been marked as removed:
+
+<CodeGroup>
+```rust NotRemovedFilter
+impl LibraryFilter for NotRemovedFilter {
+    fn predicate(library_item: &LibraryItem, _notifications: &NotificationsBucket) -> bool {
+        !library_item.removed
+    }
+}
+```
+</CodeGroup>
+
+Use this filter for the main library view.
+
+## Constructor
+
+### new()
+
+Creates a new library browser instance:
+
+<CodeGroup>
+```rust Constructor
+pub fn new(
+    library: &LibraryBucket,
+    notifications: &NotificationsBucket
+) -> (Self, Effects)
+```
+</CodeGroup>
+
+**Returns**: A tuple of the initialized model and effects to compute selectable options.
+
+## Update Implementation
+
+Implements `UpdateWithCtx<E>` to handle library operations:
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Load::LibraryWithFilters">
+    Loads the library with specified filters:
+    - Updates selected request
+    - Applies type and sort filters
+    - Paginates results
+    - Updates selectable options
+    
+    **Source**: `src/models/library_with_filters.rs:173`
+  </Accordion>
+
+  <Accordion title="Action::Unload">
+    Clears all library filter state:
+    - Resets selected to None
+    - Clears catalog
+    - Recomputes selectable options
+    
+    **Source**: `src/models/library_with_filters.rs:191`
+  </Accordion>
+
+  <Accordion title="Action::LibraryWithFilters::LoadNextPage">
+    Loads the next page of results:
+    - Increments page number
+    - Extends catalog with additional items
+    - Updates next_page availability
+    
+    **Source**: `src/models/library_with_filters.rs:209`
+  </Accordion>
+
+  <Accordion title="Internal::LibraryChanged">
+    Recomputes filtered catalog when library is updated:
+    - Reapplies current filters
+    - Updates selectable types
+    - Adjusts pagination
+    
+    **Source**: `src/models/library_with_filters.rs:235`
+  </Accordion>
+</AccordionGroup>
+
+## Pagination
+
+Library pagination works differently from catalog pagination:
+
+<Steps>
+  <Step title="Initial Load">
+    Load first page (page 1) with `CATALOG_PAGE_SIZE` items
+  </Step>
+  
+  <Step title="Check for More">
+    If there's an item at position `page * CATALOG_PAGE_SIZE`, next page is available
+  </Step>
+  
+  <Step title="Load Next Page">
+    Increment page number and take `page * CATALOG_PAGE_SIZE` items total
+  </Step>
+  
+  <Step title="Update State">
+    Catalog contains all items from page 1 to current page
+  </Step>
+</Steps>
+
+<Info>
+  Unlike catalog browsing, library filtering happens locally and instantly. All filtering and sorting is done in-memory.
+</Info>
+
+## Type Selection
+
+Types are derived from the filtered library:
+
+1. Filter library items using the filter predicate
+2. Extract unique types from filtered items
+3. Sort types by `TYPE_PRIORITIES` (movie, series, etc.)
+4. Add "All Types" option (type = None) at the beginning
+
+## Usage Example
+
+<CodeGroup>
+```rust Example: Continue Watching
+use stremio_core::models::library_with_filters::{LibraryWithFilters, ContinueWatchingFilter};
+use stremio_core::runtime::UpdateWithCtx;
+
+// Create continue watching browser
+let (mut library, effects) = LibraryWithFilters::<ContinueWatchingFilter>::new(
+    &ctx.library,
+    &ctx.notifications,
+);
+
+// Load with default sorting
+let selected = Selected {
+    request: LibraryRequest {
+        r#type: None,  // All types
+        sort: Sort::LastWatched,
+        page: LibraryRequestPage::default(),  // Page 1
+    },
+};
+
+let effects = library.update(
+    &Msg::Action(Action::Load(ActionLoad::LibraryWithFilters(selected))),
+    &ctx
+);
+
+// Change sort order
+let effects = library.update(
+    &Msg::Action(Action::Load(ActionLoad::LibraryWithFilters(Selected {
+        request: LibraryRequest {
+            r#type: None,
+            sort: Sort::Name,
+            page: LibraryRequestPage::default(),
+        },
+    }))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Full Library
+use stremio_core::models::library_with_filters::{LibraryWithFilters, NotRemovedFilter};
+
+// Create full library browser
+let (mut library, effects) = LibraryWithFilters::<NotRemovedFilter>::new(
+    &ctx.library,
+    &ctx.notifications,
+);
+
+// Filter by movies only
+let selected = Selected {
+    request: LibraryRequest {
+        r#type: Some("movie".to_string()),
+        sort: Sort::Name,
+        page: LibraryRequestPage::default(),
+    },
+};
+
+let effects = library.update(
+    &Msg::Action(Action::Load(ActionLoad::LibraryWithFilters(selected))),
+    &ctx
+);
+```
+</CodeGroup>
+
+## Performance Considerations
+
+<Warning>
+  All filtering and sorting happens on every library change. For large libraries (1000+ items), consider:
+  - Using more specific filters to reduce the working set
+  - Implementing pagination in your UI to avoid rendering all items
+  - Monitoring `Internal::LibraryChanged` message frequency
+</Warning>
+
+## Testing
+
+The module includes comprehensive tests for sort behavior:
+
+- Watched vs. not watched ordering
+- Series handling with `times_watched` and `flagged_watched`
+- Last watched timestamps
+- Creation time fallbacks
+
+**Source**: `src/models/library_with_filters.rs:371`
+
+## See Also
+
+- [LibraryBucket](/api/types/library) - Library data structure
+- [LibraryItem](/api/types/library-item) - Individual library items
+- [NotificationsBucket](/api/types/notifications) - Notifications for library items

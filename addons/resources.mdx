@@ -1,0 +1,491 @@
+---
+title: Resource Types
+description: Complete reference for addon resource requests and responses
+---
+
+## Overview
+
+Addons provide resources through well-defined request/response patterns. Each resource type serves a specific purpose in the Stremio ecosystem.
+
+## Resource Response
+
+All addon responses use the `ResourceResponse` enum:
+
+```rust
+pub enum ResourceResponse {
+    Metas { metas: Vec<MetaItemPreview> },
+    MetasDetailed { metas_detailed: Vec<MetaItem> },
+    Meta { meta: MetaItem },
+    Streams { streams: Vec<Stream> },
+    Subtitles { subtitles: Vec<Subtitles> },
+    Addons { addons: Vec<Descriptor> },
+}
+```
+
+<Warning>
+Responses must contain exactly one of these fields. Multiple fields or missing fields will cause deserialization errors.
+</Warning>
+
+### Cache Control
+
+Responses can include cache hints:
+
+```json
+{
+  "streams": [...],
+  "cacheMaxAge": 3600,
+  "staleRevalidate": 14400,
+  "staleError": 604800
+}
+```
+
+<ParamField path="cacheMaxAge" type="number">
+  Seconds to cache the response. Sets `Cache-Control: max-age=`.
+</ParamField>
+
+<ParamField path="staleRevalidate" type="number">
+  Seconds to serve stale content while revalidating. Sets `Cache-Control: stale-while-revalidate=`.
+</ParamField>
+
+<ParamField path="staleError" type="number">
+  Seconds to serve stale content on error. Sets `Cache-Control: stale-if-error=`.
+</ParamField>
+
+## Catalog Resource
+
+Provides lists of content items for browsing.
+
+### Request
+
+```
+GET /catalog/{type}/{id}/{extra}.json
+```
+
+- `type`: Content type (e.g., `movie`, `series`)
+- `id`: Catalog identifier from manifest
+- `extra`: Optional query parameters (e.g., `genre=Action&skip=100`)
+
+### Response
+
+```json
+{
+  "metas": [
+    {
+      "id": "tt1254207",
+      "type": "movie",
+      "name": "Big Buck Bunny",
+      "poster": "https://example.com/poster.jpg",
+      "posterShape": "poster",
+      "background": "https://example.com/bg.jpg",
+      "logo": "https://example.com/logo.png",
+      "description": "A large rabbit...",
+      "releaseInfo": "2008",
+      "runtime": "10 min",
+      "links": [],
+      "trailerStreams": [],
+      "behaviorHints": {}
+    }
+  ]
+}
+```
+
+### MetaItemPreview Fields
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the item (e.g., IMDb ID `tt1254207`).
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Content type: `movie`, `series`, `tv`, `channel`, etc.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Display name of the item.
+</ParamField>
+
+<ParamField path="poster" type="URL">
+  Poster image URL.
+</ParamField>
+
+<ParamField path="background" type="URL">
+  Background image URL.
+</ParamField>
+
+<ParamField path="logo" type="URL">
+  Logo image URL.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Brief description or plot summary.
+</ParamField>
+
+<ParamField path="releaseInfo" type="string">
+  Release year or date information.
+</ParamField>
+
+<ParamField path="runtime" type="string">
+  Duration information (e.g., `"120 min"`, `"2h 30m"`).
+</ParamField>
+
+<ParamField path="released" type="DateTime<Utc>">
+  ISO 8601 release date.
+</ParamField>
+
+<ParamField path="posterShape" type="PosterShape">
+  Shape of the poster: `poster` (default), `square`, or `landscape`.
+</ParamField>
+
+<ParamField path="links" type="Link[]">
+  External links (IMDb, genres, etc.).
+</ParamField>
+
+<ParamField path="trailerStreams" type="Stream[]">
+  Trailer streams for the item.
+</ParamField>
+
+<ParamField path="behaviorHints" type="MetaItemBehaviorHints">
+  Hints about item behavior.
+</ParamField>
+
+## Meta Resource
+
+Provides detailed metadata including videos/episodes.
+
+### Request
+
+```
+GET /meta/{type}/{id}.json
+```
+
+### Response
+
+```json
+{
+  "meta": {
+    "id": "tt0944947",
+    "type": "series",
+    "name": "Game of Thrones",
+    "poster": "https://example.com/poster.jpg",
+    "background": "https://example.com/bg.jpg",
+    "description": "Nine noble families...",
+    "releaseInfo": "2011-2019",
+    "posterShape": "poster",
+    "links": [],
+    "trailerStreams": [],
+    "behaviorHints": {
+      "defaultVideoId": "tt0944947:1:1",
+      "hasScheduledVideos": false
+    },
+    "videos": [
+      {
+        "id": "tt0944947:1:1",
+        "title": "Winter Is Coming",
+        "released": "2011-04-17T00:00:00Z",
+        "overview": "Eddard Stark is torn...",
+        "thumbnail": "https://example.com/thumb.jpg",
+        "season": 1,
+        "episode": 1,
+        "trailerStreams": [],
+        "streams": []
+      }
+    ]
+  }
+}
+```
+
+### MetaItem Structure
+
+<ParamField path="preview" type="MetaItemPreview">
+  All preview fields (see Catalog Resource).
+</ParamField>
+
+<ParamField path="videos" type="Video[]">
+  Episodes, movies, or other playable content.
+</ParamField>
+
+### Video Fields
+
+<ParamField path="id" type="string" required>
+  Unique video identifier. For series: `{seriesId}:{season}:{episode}`.
+</ParamField>
+
+<ParamField path="title" type="string" required>
+  Episode or video title.
+</ParamField>
+
+<ParamField path="released" type="DateTime<Utc>">
+  Release date.
+</ParamField>
+
+<ParamField path="overview" type="string">
+  Episode description.
+</ParamField>
+
+<ParamField path="thumbnail" type="string">
+  Thumbnail image URL.
+</ParamField>
+
+<ParamField path="season" type="number">
+  Season number (for series).
+</ParamField>
+
+<ParamField path="episode" type="number">
+  Episode number (for series).
+</ParamField>
+
+<ParamField path="streams" type="Stream[]">
+  Pre-attached streams for this video.
+</ParamField>
+
+<ParamField path="trailerStreams" type="Stream[]">
+  Trailer streams.
+</ParamField>
+
+## Stream Resource
+
+Provides playable video sources.
+
+### Request
+
+```
+GET /stream/{type}/{id}.json
+```
+
+For series episodes:
+```
+GET /stream/series/{seriesId}:{season}:{episode}.json
+```
+
+### Response
+
+```json
+{
+  "streams": [
+    {
+      "url": "https://example.com/video.mp4",
+      "name": "1080p",
+      "description": "High quality stream",
+      "thumbnail": "https://example.com/thumb.jpg",
+      "subtitles": [],
+      "behaviorHints": {
+        "notWebReady": false,
+        "bingeGroup": "example-group"
+      }
+    },
+    {
+      "infoHash": "24c8802e2624e17d46cd555f364debd949f2c81e",
+      "fileIdx": 0,
+      "announce": [
+        "udp://tracker.example.com:80"
+      ],
+      "name": "Torrent 1080p",
+      "behaviorHints": {}
+    }
+  ]
+}
+```
+
+### Stream Structure
+
+<ParamField path="source" type="StreamSource" required>
+  The video source. See [Stream Sources](#stream-sources) below.
+</ParamField>
+
+<ParamField path="name" type="string">
+  Display name for the stream (e.g., quality, provider).
+</ParamField>
+
+<ParamField path="description" type="string">
+  Additional information about the stream.
+</ParamField>
+
+<ParamField path="thumbnail" type="string">
+  Thumbnail image URL.
+</ParamField>
+
+<ParamField path="subtitles" type="Subtitles[]">
+  Embedded subtitle tracks.
+</ParamField>
+
+<ParamField path="behaviorHints" type="StreamBehaviorHints">
+  Playback hints and metadata.
+</ParamField>
+
+### Stream Sources
+
+#### URL Stream
+
+```json
+{
+  "url": "https://example.com/video.mp4"
+}
+```
+
+#### Torrent Stream
+
+```json
+{
+  "infoHash": "24c8802e2624e17d46cd555f364debd949f2c81e",
+  "fileIdx": 0,
+  "announce": ["udp://tracker.example.com:80"],
+  "fileMustInclude": ["episode"]
+}
+```
+
+<ParamField path="infoHash" type="hex string" required>
+  20-byte torrent info hash (40 hex characters).
+</ParamField>
+
+<ParamField path="fileIdx" type="number">
+  File index in the torrent. Omit for automatic selection.
+</ParamField>
+
+<ParamField path="announce" type="string[]">
+  Tracker URLs.
+</ParamField>
+
+<ParamField path="fileMustInclude" type="string[]">
+  Filename must contain these strings.
+</ParamField>
+
+#### YouTube Stream
+
+```json
+{
+  "ytId": "dQw4w9WgXcQ"
+}
+```
+
+#### Archive Streams
+
+For RAR, ZIP, 7ZIP, TAR, TGZ files:
+
+```json
+{
+  "rarUrls": [
+    ["https://example.com/file.rar", 10000],
+    ["https://example.com/file2.rar"]
+  ],
+  "fileIdx": 0,
+  "fileMustInclude": ["episode1"]
+}
+```
+
+Supported archive types: `rarUrls`, `zipUrls`, `7zipUrls`, `tarUrls`, `tgzUrls`
+
+#### External Stream
+
+```json
+{
+  "externalUrl": "https://example.com/watch",
+  "androidTvUrl": "intent://...",
+  "tizenUrl": "tizen://...",
+  "webosUrl": "webos://..."
+}
+```
+
+#### Player Frame
+
+```json
+{
+  "playerFrameUrl": "https://example.com/embed/player"
+}
+```
+
+### Stream Behavior Hints
+
+<ParamField path="notWebReady" type="boolean" default={false}>
+  Stream is not playable in web browsers.
+</ParamField>
+
+<ParamField path="bingeGroup" type="string">
+  Identifier for grouping streams for binge-watching.
+</ParamField>
+
+<ParamField path="countryWhitelist" type="string[]">
+  List of countries where stream is available.
+</ParamField>
+
+<ParamField path="proxyHeaders" type="StreamProxyHeaders">
+  Headers to use when proxying the stream.
+  
+  ```json
+  {
+    "request": {"Authorization": "Bearer token"},
+    "response": {"Access-Control-Allow-Origin": "*"}
+  }
+  ```
+</ParamField>
+
+<ParamField path="filename" type="string">
+  Suggested filename for downloads.
+</ParamField>
+
+<ParamField path="videoHash" type="string">
+  Hash of the video content.
+</ParamField>
+
+<ParamField path="videoSize" type="number">
+  Video file size in bytes.
+</ParamField>
+
+## Subtitles Resource
+
+Provides subtitle tracks.
+
+### Request
+
+```
+GET /subtitles/{type}/{id}.json
+```
+
+### Response
+
+```json
+{
+  "subtitles": [
+    {
+      "id": "en",
+      "lang": "eng",
+      "url": "https://example.com/subtitles/en.srt"
+    },
+    {
+      "id": "es",
+      "lang": "spa",
+      "url": "https://example.com/subtitles/es.vtt"
+    }
+  ]
+}
+```
+
+### Subtitles Fields
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the subtitle track.
+</ParamField>
+
+<ParamField path="lang" type="string" required>
+  ISO 639-3 language code (e.g., `eng`, `spa`, `fra`).
+</ParamField>
+
+<ParamField path="url" type="URL" required>
+  Direct URL to the subtitle file (SRT, VTT, etc.).
+</ParamField>
+
+## Best Practices
+
+<Tip>
+**Null Handling**: The deserializer skips invalid items in arrays and treats `null` as empty arrays.
+</Tip>
+
+<Tip>
+**Error Responses**: Invalid JSON or multiple response fields will cause deserialization errors.
+</Tip>
+
+<Tip>
+**Caching**: Use cache headers to reduce server load and improve performance.
+</Tip>
+
+<Tip>
+**Video IDs**: For series, use the format `{seriesId}:{season}:{episode}` for consistency.
+</Tip>

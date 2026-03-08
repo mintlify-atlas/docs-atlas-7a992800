@@ -1,0 +1,310 @@
+---
+title: 'CatalogWithFilters'
+description: 'Model for browsing addon catalogs with filtering and pagination'
+---
+
+## Overview
+
+The `CatalogWithFilters` model manages catalog browsing with support for filtering by type, catalog, and extra properties. It handles pagination and provides a selectable interface for users to refine their catalog queries.
+
+This is a generic model that works with different content types through the `CatalogResourceAdapter` trait.
+
+## Structure
+
+### Fields
+
+<ResponseField name="selected" type="Option<Selected>">
+  Currently selected catalog request with filters applied
+</ResponseField>
+
+<ResponseField name="selectable" type="Selectable" required>
+  Available filter options for types, catalogs, and extra properties
+</ResponseField>
+
+<ResponseField name="catalog" type="Catalog<T>" required>
+  Paginated catalog pages. Each page is a `ResourceLoadable<Vec<T>>`
+</ResponseField>
+
+## Selected
+
+Represents the currently selected catalog filters:
+
+<CodeGroup>
+```rust Selected
+pub struct Selected {
+    pub request: ResourceRequest,
+}
+```
+</CodeGroup>
+
+<ResponseField name="request" type="ResourceRequest" required>
+  The resource request containing base URL, resource path, type, and extra filters
+</ResponseField>
+
+## Selectable
+
+Provides available filter options:
+
+<CodeGroup>
+```rust Selectable
+pub struct Selectable {
+    pub types: Vec<SelectableType>,
+    pub catalogs: Vec<SelectableCatalog>,
+    pub extra: Vec<SelectableExtra>,
+    pub next_page: Option<SelectablePage>,
+}
+```
+</CodeGroup>
+
+<ResponseField name="types" type="Vec<SelectableType>" required>
+  Available content types (movie, series, etc.) with selection state
+</ResponseField>
+
+<ResponseField name="catalogs" type="Vec<SelectableCatalog>" required>
+  Available catalogs from addons with selection state
+</ResponseField>
+
+<ResponseField name="extra" type="Vec<SelectableExtra>" required>
+  Additional filter options (genre, year, etc.) with values
+</ResponseField>
+
+<ResponseField name="next_page" type="Option<SelectablePage>">
+  Request for loading the next page, if available
+</ResponseField>
+
+## SelectableType
+
+<ResponseField name="type" type="String" required>
+  Content type identifier (e.g., "movie", "series")
+</ResponseField>
+
+<ResponseField name="selected" type="bool" required>
+  Whether this type is currently selected
+</ResponseField>
+
+<ResponseField name="request" type="ResourceRequest" required>
+  Request to apply this type filter
+</ResponseField>
+
+## SelectableCatalog
+
+<ResponseField name="catalog" type="String" required>
+  Catalog name from addon manifest
+</ResponseField>
+
+<ResponseField name="selected" type="bool" required>
+  Whether this catalog is currently selected
+</ResponseField>
+
+<ResponseField name="request" type="ResourceRequest" required>
+  Request to switch to this catalog
+</ResponseField>
+
+## SelectableExtra
+
+<ResponseField name="name" type="String" required>
+  Extra property name (e.g., "genre", "year")
+</ResponseField>
+
+<ResponseField name="is_required" type="bool" required>
+  Whether this extra is required by the addon
+</ResponseField>
+
+<ResponseField name="options" type="Vec<SelectableExtraOption>" required>
+  Available values for this extra property
+</ResponseField>
+
+## CatalogResourceAdapter
+
+The generic type `T` must implement this trait:
+
+<CodeGroup>
+```rust CatalogResourceAdapter
+pub trait CatalogResourceAdapter {
+    fn resource() -> &'static str;
+    fn catalogs(manifest: &Manifest) -> &[ManifestCatalog];
+    fn selectable_priority() -> SelectablePriority;
+}
+```
+</CodeGroup>
+
+### Built-in Implementations
+
+- **MetaItemPreview**: For browsing meta catalogs (movies, series)
+  - Resource: `"catalog"`
+  - Priority: `SelectablePriority::Type`
+- **DescriptorPreview**: For browsing addon catalogs
+  - Resource: `"addon_catalog"`
+  - Priority: `SelectablePriority::Catalog`
+- **Descriptor**: For browsing full addon descriptors
+  - Resource: `"addon_catalog"`
+  - Priority: `SelectablePriority::Catalog`
+
+## Constructor
+
+### new()
+
+Creates a new catalog browser instance:
+
+<CodeGroup>
+```rust Constructor
+pub fn new(profile: &Profile) -> (Self, Effects)
+```
+</CodeGroup>
+
+**Returns**: A tuple of the initialized model and effects to load initial selectable state.
+
+## Update Implementation
+
+Implements `UpdateWithCtx<E>` to handle catalog operations:
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Load::CatalogWithFilters">
+    Loads a catalog with the specified filters:
+    - Updates selected request
+    - Clears existing catalog pages
+    - Loads first page of results
+    - Updates selectable options
+    
+    **Source**: `src/models/catalog_with_filters.rs:157`
+  </Accordion>
+
+  <Accordion title="Action::Unload">
+    Clears all catalog data:
+    - Resets selected to None
+    - Clears catalog pages
+    - Updates selectable based on profile addons
+    
+    **Source**: `src/models/catalog_with_filters.rs:178`
+  </Accordion>
+
+  <Accordion title="Action::CatalogWithFilters::LoadNextPage">
+    Loads the next page of catalog results:
+    - Uses `next_page` request from selectable
+    - Appends results to existing catalog
+    - Updates pagination state
+    
+    **Source**: `src/models/catalog_with_filters.rs:191`
+  </Accordion>
+
+  <Accordion title="Internal::ResourceRequestResult">
+    Processes resource responses:
+    - Updates corresponding catalog page
+    - Marks page as Ready or Err
+    - Refreshes selectable options
+    
+    **Source**: `src/models/catalog_with_filters.rs:210`
+  </Accordion>
+
+  <Accordion title="Internal::ProfileChanged">
+    Updates selectable options when profile changes (addons added/removed)
+    
+    **Source**: `src/models/catalog_with_filters.rs:230`
+  </Accordion>
+</AccordionGroup>
+
+## Filtering Logic
+
+### Type Selection
+
+When `SelectablePriority::Type` is used:
+
+1. Types are derived from all addon catalogs
+2. Types are sorted by predefined priorities (movie, series, etc.)
+3. Selecting a type filters available catalogs
+
+### Catalog Selection
+
+When `SelectablePriority::Catalog` is used:
+
+1. Catalogs are shown first
+2. Selecting a catalog filters available types
+3. Only types available in selected catalog are shown
+
+### Extra Filters
+
+Extra properties from addon manifests:
+
+- Required extras must have a value selected
+- Optional extras can be None
+- Each option includes a request with that filter applied
+- Skip extra is handled specially for pagination
+
+## Pagination
+
+Pagination uses the `skip` extra property:
+
+<Steps>
+  <Step title="First Page">
+    Initial request has no skip property or skip=0
+  </Step>
+  
+  <Step title="Calculate Skip">
+    When all pages are loaded successfully, sum their content lengths
+  </Step>
+  
+  <Step title="Next Page Request">
+    Create request with skip={total_items} to load next page
+  </Step>
+  
+  <Step title="Append Results">
+    New page is appended to catalog array
+  </Step>
+</Steps>
+
+## Usage Example
+
+<CodeGroup>
+```rust Example
+use stremio_core::models::catalog_with_filters::CatalogWithFilters;
+use stremio_core::runtime::UpdateWithCtx;
+use stremio_core::types::resource::MetaItemPreview;
+
+// Create catalog browser for meta items
+let (mut catalog, effects) = CatalogWithFilters::<MetaItemPreview>::new(&profile);
+
+// Load a specific catalog
+let selected = Selected {
+    request: ResourceRequest {
+        base: "https://addon.example.com".parse().unwrap(),
+        path: ResourcePath {
+            resource: "catalog".to_string(),
+            r#type: "movie".to_string(),
+            id: "top".to_string(),
+            extra: vec![],
+        },
+    },
+};
+
+let effects = catalog.update(
+    &Msg::Action(Action::Load(ActionLoad::CatalogWithFilters(Some(selected)))),
+    &ctx
+);
+
+// Load next page
+if catalog.selectable.next_page.is_some() {
+    let effects = catalog.update(
+        &Msg::Action(Action::CatalogWithFilters(ActionCatalogWithFilters::LoadNextPage)),
+        &ctx
+    );
+}
+```
+</CodeGroup>
+
+## State Management
+
+<Warning>
+  Catalog state persists until explicitly unloaded. Make sure to call `Action::Unload` when navigating away to free memory.
+</Warning>
+
+<Info>
+  The model automatically removes the `skip` extra from selected requests to ensure consistent filter state.
+</Info>
+
+## See Also
+
+- [ResourceRequest](/api/types/resource-request) - Resource request structure
+- [MetaItemPreview](/api/types/meta-item) - Meta item preview type
+- [Profile](/api/types/profile) - User profile with addons

@@ -1,80 +1,469 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build your first Stremio Core application in minutes"
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
+This guide will walk you through creating a minimal Stremio Core application that:
 
-### Step 1: Set up your local environment
+1. Initializes a `Runtime` with a `Ctx` model
+2. Dispatches actions to update state
+3. Handles effects automatically
+4. Receives state update events
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+## Prerequisites
 
-### Step 2: Deploy your changes
+Make sure you have:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+- Rust 1.77 or later installed
+- Stremio Core added to your project (see [Installation](/installation))
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Project Setup
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Create a new Rust project:
 
-### Step 3: Go live
+```bash
+cargo new stremio-hello-world
+cd stremio-hello-world
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Add dependencies to `Cargo.toml`:
 
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+```toml Cargo.toml
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["env-future-send", "derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Remove the `env-future-send` feature if targeting WebAssembly.
 </Note>
+
+## Step 1: Implement the Environment Trait
+
+The `Env` trait abstracts platform-specific operations. Here's a minimal implementation:
+
+```rust src/env.rs
+use chrono::{DateTime, Utc};
+use futures::{future, Future};
+use http::Request;
+use serde::{Deserialize, Serialize};
+use stremio_core::{
+    models::{ctx::Ctx, streaming_server::StreamingServer},
+    runtime::{Env, EnvError, EnvFutureExt, TryEnvFuture},
+};
+
+/// Simple environment implementation
+pub struct SimpleEnv;
+
+impl Env for SimpleEnv {
+    fn fetch<
+        IN: Serialize + Send + 'static,
+        OUT: for<'de> Deserialize<'de> + Send + 'static,
+    >(
+        request: Request<IN>,
+    ) -> TryEnvFuture<OUT> {
+        // In a real app, implement actual HTTP fetching here
+        // For now, return an error
+        let error = EnvError::Fetch("Not implemented".to_string());
+        future::err(error).boxed_env()
+    }
+
+    fn get_storage<T: for<'de> Deserialize<'de> + Send + 'static>(
+        _key: &str,
+    ) -> TryEnvFuture<Option<T>> {
+        // In a real app, implement actual storage reading
+        future::ok(None).boxed_env()
+    }
+
+    fn set_storage<T: Serialize>(_key: &str, _value: Option<&T>) -> TryEnvFuture<()> {
+        // In a real app, implement actual storage writing
+        future::ok(()).boxed_env()
+    }
+
+    fn exec_concurrent<F: Future<Output = ()> + Send + 'static>(future: F) {
+        tokio::spawn(future);
+    }
+
+    fn exec_sequential<F: Future<Output = ()> + Send + 'static>(future: F) {
+        tokio::spawn(future);
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn flush_analytics() -> stremio_core::runtime::EnvFuture<'static, ()> {
+        future::ready(()).boxed_env()
+    }
+
+    fn analytics_context(
+        _ctx: &Ctx,
+        _streaming_server: &StreamingServer,
+        _path: &str,
+    ) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    #[cfg(debug_assertions)]
+    fn log(message: String) {
+        println!("[LOG] {}", message);
+    }
+}
+```
+
+<Tip>
+  For production applications, implement proper HTTP fetching using libraries like `reqwest` and storage using platform-specific APIs.
+</Tip>
+
+## Step 2: Create a Simple Model
+
+Let's create a wrapper model that uses `Ctx` (the main context model):
+
+```rust src/model.rs
+use serde::{Deserialize, Serialize};
+use stremio_core::{
+    models::ctx::Ctx,
+    runtime::{Effect, Env, Model, Msg, Update},
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AppField {
+    Ctx,
+}
+
+#[derive(Clone, Serialize)]
+pub struct App {
+    pub ctx: Ctx,
+}
+
+impl App {
+    pub fn new() -> Self {
+        // Create a new context with default profile and empty collections
+        let ctx = Ctx::new(
+            Default::default(), // Profile
+            Default::default(), // LibraryBucket
+            Default::default(), // StreamsBucket
+            Default::default(), // ServerUrlsBucket
+            Default::default(), // NotificationsBucket
+            Default::default(), // SearchHistoryBucket
+            Default::default(), // DismissedEventsBucket
+        );
+
+        App { ctx }
+    }
+}
+
+impl<E: Env> Model<E> for App {
+    type Field = AppField;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>) {
+        let (ctx_effects, _) = self.ctx.update(msg);
+        let changed_fields = if ctx_effects.has_changed {
+            vec![AppField::Ctx]
+        } else {
+            vec![]
+        };
+        (ctx_effects.into_iter().collect(), changed_fields)
+    }
+
+    fn update_field(
+        &mut self,
+        msg: &Msg,
+        field: &Self::Field,
+    ) -> (Vec<Effect>, Vec<Self::Field>) {
+        match field {
+            AppField::Ctx => self.update(msg),
+        }
+    }
+}
+```
+
+<Note>
+  The `Model` trait requires implementing `update()` and `update_field()` methods. These methods process messages and return effects along with changed fields.
+</Note>
+
+## Step 3: Initialize the Runtime and Handle Events
+
+Now let's create the main application that initializes the runtime and handles events:
+
+```rust src/main.rs
+mod env;
+mod model;
+
+use futures::StreamExt;
+use stremio_core::runtime::{
+    msg::{Action, ActionCtx},
+    Runtime, RuntimeAction, RuntimeEvent,
+};
+use stremio_core::types::api::AuthRequest;
+
+use crate::env::SimpleEnv;
+use crate::model::App;
+
+#[tokio::main]
+async fn main() {
+    println!("Initializing Stremio Core application...");
+
+    // Step 1: Create the initial model
+    let app = App::new();
+    println!("✓ Model created");
+
+    // Step 2: Initialize runtime with buffer size of 100 events
+    let (runtime, mut rx) = Runtime::<SimpleEnv, App>::new(
+        app,
+        vec![], // Initial effects
+        100,    // Event buffer size
+    );
+    println!("✓ Runtime initialized");
+
+    // Step 3: Spawn event handler
+    let event_handler = tokio::spawn(async move {
+        let mut event_count = 0;
+        while let Some(event) = rx.next().await {
+            event_count += 1;
+            match event {
+                RuntimeEvent::NewState(fields, _) => {
+                    println!("[Event {}] State changed: {:?}", event_count, fields);
+                }
+                RuntimeEvent::CoreEvent(core_event) => {
+                    println!("[Event {}] Core event: {:?}", event_count, core_event);
+                }
+            }
+        }
+        println!("Event stream closed. Total events: {}", event_count);
+    });
+
+    // Step 4: Read the current model state
+    {
+        let model = runtime.model().expect("Failed to read model");
+        println!("\n📊 Current state:");
+        println!("  - Authenticated: {}", model.ctx.profile.auth.is_some());
+        println!("  - Addons count: {}", model.ctx.profile.addons.len());
+        println!("  - Library items: {}", model.ctx.library.items.len());
+    }
+
+    // Step 5: Dispatch some actions
+    println!("\n🚀 Dispatching actions...");
+
+    // Example: Try to authenticate (will fail with our simple env, but demonstrates the flow)
+    runtime.dispatch(RuntimeAction {
+        field: None,
+        action: Action::Ctx(ActionCtx::Authenticate(AuthRequest {
+            type_field: "Login".to_string(),
+            email: Some("user@example.com".to_string()),
+            password: Some("password".to_string()),
+            facebook: None,
+        })),
+    });
+    println!("  ✓ Dispatched authentication action");
+
+    // Give some time for events to process
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Step 6: Read the model state again
+    {
+        let model = runtime.model().expect("Failed to read model");
+        println!("\n📊 State after actions:");
+        println!("  - Context status: {:?}", model.ctx.status);
+    }
+
+    println!("\n✅ Application completed successfully!");
+
+    // Wait a bit for all events to be processed
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Note: In a real application, you'd keep the runtime alive
+    // and continue dispatching actions based on user input
+
+    drop(runtime);
+    event_handler.await.unwrap();
+}
+```
+
+## Step 4: Run Your Application
+
+```bash
+cargo run
+```
+
+You should see output similar to:
+
+```
+Initializing Stremio Core application...
+✓ Model created
+✓ Runtime initialized
+
+📊 Current state:
+  - Authenticated: false
+  - Addons count: 5
+  - Library items: 0
+
+🚀 Dispatching actions...
+  ✓ Dispatched authentication action
+[Event 1] State changed: [Ctx]
+[Event 2] Core event: ...
+
+📊 State after actions:
+  - Context status: Loading(AuthRequest { ... })
+
+✅ Application completed successfully!
+Event stream closed. Total events: 2
+```
+
+## Understanding the Flow
+
+<Steps>
+  <Step title="Model Creation">
+    Create your initial model state (in this case, an `App` containing a `Ctx`)
+  </Step>
+  
+  <Step title="Runtime Initialization">
+    Initialize the `Runtime` with your model and environment type. This returns a runtime instance and an event receiver.
+  </Step>
+  
+  <Step title="Event Handling">
+    Spawn a task to process events from the runtime. You'll receive `RuntimeEvent::NewState` when state changes and `RuntimeEvent::CoreEvent` for other events.
+  </Step>
+  
+  <Step title="Dispatch Actions">
+    Call `runtime.dispatch()` with `RuntimeAction` to trigger state changes. Actions flow through the update functions.
+  </Step>
+  
+  <Step title="Effects Execution">
+    The runtime automatically executes effects (HTTP requests, storage operations) returned from update functions.
+  </Step>
+  
+  <Step title="State Updates">
+    When effects complete or state changes, new events are emitted, creating a unidirectional data flow.
+  </Step>
+</Steps>
+
+## Common Actions
+
+Here are some common actions you can dispatch:
+
+<CodeGroup>
+
+```rust Authentication
+use stremio_core::runtime::msg::{Action, ActionCtx};
+use stremio_core::types::api::AuthRequest;
+
+// Login
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::Authenticate(AuthRequest {
+        type_field: "Login".to_string(),
+        email: Some("user@example.com".to_string()),
+        password: Some("password".to_string()),
+        facebook: None,
+    })),
+});
+
+// Logout
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::Logout),
+});
+```
+
+```rust Library Management
+use stremio_core::runtime::msg::{Action, ActionCtx};
+use stremio_core::types::resource::MetaItemPreview;
+
+// Add to library
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::AddToLibrary(meta_item_preview)),
+});
+
+// Remove from library
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::RemoveFromLibrary("item_id".to_string())),
+});
+```
+
+```rust Add-on Management
+use stremio_core::runtime::msg::{Action, ActionCtx};
+use stremio_core::types::addon::Descriptor;
+
+// Install addon
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::InstallAddon(descriptor)),
+});
+
+// Uninstall addon
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::UninstallAddon(descriptor)),
+});
+```
+
+```rust Load Models
+use stremio_core::runtime::msg::{Action, ActionLoad};
+
+// Load catalog
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Load(ActionLoad::CatalogWithFilters(Some(selected))),
+});
+
+// Load meta details
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Load(ActionLoad::MetaDetails(selected)),
+});
+```
+
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Models Reference" icon="cube" href="/api-reference/models">
+    Learn about all available models and their capabilities
+  </Card>
+  
+  <Card title="Actions Reference" icon="bolt" href="/api-reference/actions">
+    Explore all actions you can dispatch
+  </Card>
+  
+  <Card title="Environment Trait" icon="circle-nodes" href="/api-reference/environment">
+    Implement the Env trait for your platform
+  </Card>
+  
+  <Card title="Types Reference" icon="shapes" href="/api-reference/types">
+    Browse all core data types
+  </Card>
+</CardGroup>
+
+## Tips and Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep update functions pure">
+    Update functions should be pure - they shouldn't perform side effects directly. Instead, return `Effect` values that the runtime will execute.
+  </Accordion>
+  
+  <Accordion title="Handle all events">
+    Always process events from the runtime in a dedicated task or thread. Unprocessed events can cause the channel to fill up and block.
+  </Accordion>
+  
+  <Accordion title="Use appropriate buffer sizes">
+    The buffer size in `Runtime::new()` determines how many events can be queued. For most applications, 100 is a good starting point.
+  </Accordion>
+  
+  <Accordion title="Implement proper error handling">
+    In production, implement proper error handling in your `Env` implementation, especially for fetch and storage operations.
+  </Accordion>
+  
+  <Accordion title="Clone the runtime for multiple dispatchers">
+    The `Runtime` implements `Clone`, so you can share it across threads or tasks to dispatch actions from multiple places.
+  </Accordion>
+</AccordionGroup>

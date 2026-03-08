@@ -1,0 +1,410 @@
+---
+title: Environment Trait
+description: Complete guide to implementing the Env trait for platform integration
+---
+
+The `Env` trait is the core abstraction that allows Stremio Core to run on different platforms. It defines the interface for platform-specific operations like network requests, storage, and task execution.
+
+## Overview
+
+The `Env` trait is defined in `src/runtime/env.rs` and provides a platform-agnostic interface for:
+
+- HTTP requests (fetch)
+- Persistent storage (get/set)
+- Task execution (concurrent and sequential)
+- Time operations
+- Analytics
+- Logging
+- Add-on transport
+- Storage schema migration
+
+## Core Methods
+
+### Network Operations
+
+#### `fetch`
+
+```rust
+fn fetch<IN, OUT>(request: Request<IN>) -> TryEnvFuture<OUT>
+where
+    IN: Serialize + ConditionalSend + 'static,
+    OUT: for<'de> Deserialize<'de> + ConditionalSend + 'static;
+```
+
+Performs HTTP requests with automatic serialization/deserialization.
+
+<CodeGroup>
+```rust Example Usage
+use http::Request;
+use stremio_core::runtime::Env;
+
+// GET request
+let request = Request::get("https://api.example.com/data")
+    .body(())
+    .unwrap();
+
+let response: MyResponseType = YourEnv::fetch(request).await?;
+
+// POST request with body
+let request = Request::post("https://api.example.com/submit")
+    .header("content-type", "application/json")
+    .body(my_data)
+    .unwrap();
+
+let response: SubmitResponse = YourEnv::fetch(request).await?;
+```
+</CodeGroup>
+
+### Storage Operations
+
+#### `get_storage`
+
+```rust
+fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>
+where
+    for<'de> T: Deserialize<'de> + 'static;
+```
+
+Retrieves data from persistent storage with automatic deserialization.
+
+#### `set_storage`
+
+```rust
+fn set_storage<T: Serialize>(key: &str, value: Option<&T>) -> TryEnvFuture<()>;
+```
+
+Stores data in persistent storage. Pass `None` to delete the key.
+
+<CodeGroup>
+```rust Example Usage
+use stremio_core::runtime::Env;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct UserSettings {
+    theme: String,
+    language: String,
+}
+
+// Save settings
+let settings = UserSettings {
+    theme: "dark".to_owned(),
+    language: "en".to_owned(),
+};
+YourEnv::set_storage("user_settings", Some(&settings)).await?;
+
+// Load settings
+let settings: Option<UserSettings> = YourEnv::get_storage("user_settings").await?;
+
+// Delete settings
+YourEnv::set_storage::<UserSettings>("user_settings", None).await?;
+```
+</CodeGroup>
+
+### Task Execution
+
+#### `exec_concurrent`
+
+```rust
+fn exec_concurrent<F: Future<Output = ()> + ConditionalSend + 'static>(future: F);
+```
+
+Executes a future without waiting for completion. Use for background tasks.
+
+#### `exec_sequential`
+
+```rust
+fn exec_sequential<F: Future<Output = ()> + ConditionalSend + 'static>(future: F);
+```
+
+Executes a future sequentially (may be the same as concurrent on some platforms).
+
+<CodeGroup>
+```rust Example Usage
+use stremio_core::runtime::Env;
+
+// Background analytics task
+YourEnv::exec_concurrent(async {
+    // Send analytics
+    log_event("user_action").await;
+});
+
+// Sequential task
+YourEnv::exec_sequential(async {
+    // Process queue item
+    process_next_item().await;
+});
+```
+</CodeGroup>
+
+### Time Operations
+
+#### `now`
+
+```rust
+fn now() -> DateTime<Utc>;
+```
+
+Returns the current UTC time.
+
+<CodeGroup>
+```rust Example Usage
+use stremio_core::runtime::Env;
+
+let current_time = YourEnv::now();
+println!("Current time: {}", current_time);
+```
+</CodeGroup>
+
+### Analytics
+
+#### `flush_analytics`
+
+```rust
+fn flush_analytics() -> EnvFuture<'static, ()>;
+```
+
+Flushes any pending analytics events.
+
+#### `analytics_context`
+
+```rust
+fn analytics_context(
+    ctx: &Ctx,
+    streaming_server: &StreamingServer,
+    path: &str,
+) -> serde_json::Value;
+```
+
+Generates analytics context for the current state.
+
+### Debugging
+
+#### `log` (debug builds only)
+
+```rust
+#[cfg(debug_assertions)]
+fn log(message: String);
+```
+
+Logs a message in debug builds.
+
+<CodeGroup>
+```rust Example Usage
+#[cfg(debug_assertions)]
+YourEnv::log(format!("Debug info: {:?}", data));
+```
+</CodeGroup>
+
+### Default Implementations
+
+#### `addon_transport`
+
+```rust
+fn addon_transport(transport_url: &Url) -> Box<dyn AddonTransport>;
+```
+
+Creates an add-on transport for the given URL. Default implementation supports HTTP/HTTPS.
+
+#### `migrate_storage_schema`
+
+```rust
+fn migrate_storage_schema() -> TryEnvFuture<()>;
+```
+
+Migrates storage schema to the current version. Has a default implementation.
+
+## Error Handling
+
+The `EnvError` enum defines all possible error types:
+
+```rust
+pub enum EnvError {
+    Fetch(String),
+    AddonTransport(String),
+    Serde(String),
+    StorageUnavailable,
+    StorageSchemaVersionDowngrade(u32, u32),
+    StorageSchemaVersionUpgrade(Box<EnvError>),
+    StorageReadError(String),
+    StorageWriteError(String),
+    Other(String),
+}
+```
+
+Each error has a numeric code and message accessible via `code()` and `message()` methods.
+
+## Future Types
+
+### `EnvFuture<'a, T>`
+
+The return type for async operations. Automatically handles platform differences:
+
+- **WASM** (default): Uses `LocalBoxFuture` (not `Send`)
+- **Native** (with `env-future-send` feature): Uses `BoxFuture` (requires `Send`)
+
+### `ConditionalSend`
+
+A marker trait that is:
+- Empty trait on WASM (all types implement it)
+- Equivalent to `Send` on native platforms
+
+## Implementation Example
+
+Here's a minimal native implementation:
+
+<CodeGroup>
+```rust Native Implementation
+use stremio_core::runtime::{Env, EnvError, TryEnvFuture, EnvFutureExt};
+use chrono::{DateTime, Utc};
+use http::Request;
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::Mutex;
+use std::collections::HashMap;
+
+pub struct NativeEnv;
+
+static STORAGE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+
+impl Env for NativeEnv {
+    fn fetch<IN, OUT>(request: Request<IN>) -> TryEnvFuture<OUT>
+    where
+        IN: Serialize + 'static,
+        OUT: for<'de> Deserialize<'de> + 'static,
+    {
+        async move {
+            // Implement HTTP request using reqwest or similar
+            let client = reqwest::Client::new();
+            let response = client
+                .request(request.method().clone(), request.uri().to_string())
+                .json(&request.body())
+                .send()
+                .await
+                .map_err(|e| EnvError::Fetch(e.to_string()))?;
+            
+            response
+                .json::<OUT>()
+                .await
+                .map_err(|e| EnvError::Serde(e.to_string()))
+        }
+        .boxed_env()
+    }
+
+    fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>
+    where
+        for<'de> T: Deserialize<'de> + 'static,
+    {
+        let key = key.to_owned();
+        async move {
+            let storage = STORAGE.lock().unwrap();
+            storage
+                .get(&key)
+                .map(|value| serde_json::from_str(value))
+                .transpose()
+                .map_err(|e| EnvError::StorageReadError(e.to_string()))
+        }
+        .boxed_env()
+    }
+
+    fn set_storage<T: Serialize>(key: &str, value: Option<&T>) -> TryEnvFuture<()> {
+        let key = key.to_owned();
+        let value = value
+            .map(|v| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| EnvError::StorageWriteError(e.to_string()));
+        
+        async move {
+            let value = value?;
+            let mut storage = STORAGE.lock().unwrap();
+            match value {
+                Some(v) => storage.insert(key, v),
+                None => storage.remove(&key),
+            };
+            Ok(())
+        }
+        .boxed_env()
+    }
+
+    fn exec_concurrent<F>(future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        tokio::spawn(future);
+    }
+
+    fn exec_sequential<F>(future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        tokio::spawn(future);
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn flush_analytics() -> EnvFuture<'static, ()> {
+        async {}.boxed_env()
+    }
+
+    fn analytics_context(
+        ctx: &Ctx,
+        streaming_server: &StreamingServer,
+        path: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "app_type": "native",
+            "path": path
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn log(message: String) {
+        println!("[Stremio] {}", message);
+    }
+}
+```
+</CodeGroup>
+
+## Storage Keys
+
+Stremio Core uses these storage keys (defined in `src/constants.rs`):
+
+- `SCHEMA_VERSION_STORAGE_KEY`: Storage schema version
+- `PROFILE_STORAGE_KEY`: User profile
+- `LIBRARY_STORAGE_KEY`: Library data
+- `LIBRARY_RECENT_STORAGE_KEY`: Recently watched
+- `STREAMS_STORAGE_KEY`: Cached streams
+- `SEARCH_HISTORY_STORAGE_KEY`: Search history
+- `STREAMING_SERVER_URLS_STORAGE_KEY`: Streaming server URLs
+- `DISMISSED_EVENTS_STORAGE_KEY`: Dismissed events
+
+<Note>
+Do not modify these keys directly. Use the Context model's methods instead.
+</Note>
+
+## Platform-Specific Considerations
+
+### WASM
+
+- Cannot use `Send` trait
+- Must use `LocalBoxFuture`
+- See [WASM Bindings](/integration/wasm-bindings) for complete implementation
+
+### Native
+
+- Can enable `env-future-send` feature for `Send` futures
+- Use async runtime like Tokio
+- See [Native Apps](/integration/native-apps) for complete guide
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="WASM Bindings" icon="code" href="/integration/wasm-bindings">
+    Learn how to use stremio-core-web package
+  </Card>
+  <Card title="Native Apps" icon="desktop" href="/integration/native-apps">
+    Build native applications with stremio-core
+  </Card>
+</CardGroup>

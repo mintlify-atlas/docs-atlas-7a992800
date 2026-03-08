@@ -1,0 +1,171 @@
+---
+title: "Introduction to Stremio Core"
+description: "A Rust crate containing all the reusable logic for building Stremio applications across platforms"
+---
+
+## Overview
+
+**Stremio Core** is a Rust crate designed to contain all the reusable logic between Stremio versions. It provides a flexible, correct, and modern foundation for building full-featured media center applications.
+
+<Note>
+  Stremio is a full-featured media center designed to help you organize and stream your favorite videos, movies, and TV series. It notifies you for new episodes/movies and helps you discover new content.
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Cross-Stack Integration" icon="layer-group">
+    Flexible enough to integrate into existing code bases across the entire stack and in different paradigms
+  </Card>
+  <Card title="Type Safety" icon="shield-check">
+    Comprehensive type system that can be used by add-ons and applications
+  </Card>
+  <Card title="Elm Architecture" icon="arrows-rotate">
+    State management inspired by the Elm architecture with clear Effects and Update patterns
+  </Card>
+  <Card title="Add-on System" icon="puzzle-piece">
+    Built-in support for Stremio's powerful add-on system for extending functionality
+  </Card>
+</CardGroup>
+
+## Design Goals
+
+### Flexibility
+
+Stremio Core is designed to be integrated in multiple ways:
+
+- **Type Library**: The `types` module can be used standalone by add-ons
+- **Authentication Layer**: Can be integrated as an addition to existing apps with their own user authentication
+- **Full Context Model**: Use the `Ctx` model as a backbone to manage user authentication, add-ons, and the entire Stremio app
+
+### Emphasis on Correctness
+
+The crate prioritizes correctness and type safety, leveraging Rust's strong type system to prevent bugs at compile time.
+
+### No Legacy Burden
+
+Built fresh without being constrained by obsolete decisions and solutions from previous implementations.
+
+## Core Modules
+
+Stremio Core is organized into several key modules:
+
+### Types
+
+Core data structures and types used throughout the application:
+
+- **addon**: Add-on descriptors and manifests
+- **profile**: User profiles, authentication, and settings  
+- **library**: Library items and collections
+- **streams**: Stream metadata and state
+- **resource**: Meta items, videos, and catalogs
+
+### Runtime
+
+The runtime system that powers the application:
+
+- **Environment trait**: Abstracts platform-specific operations (fetch, storage)
+- **Runtime**: Handles effects automatically and manages the event loop
+- **Messages**: Actions, events, and internal messages
+- **Effects**: Async operations and side effects
+
+### Models
+
+Stateful models that implement the Update trait:
+
+- **Ctx**: Manages user authentication, add-ons, library, and streams
+- **CatalogWithFilters**: Filtered catalog browsing
+- **MetaDetails**: Detailed metadata view
+- **Player**: Video playback state
+- **Calendar**: Content calendar view
+- **LibraryWithFilters**: Filtered library view
+
+### Addon Transport
+
+Handles communication with add-ons and implements legacy protocol adapters.
+
+## Architecture
+
+Stremio Core follows the **Elm Architecture** pattern:
+
+```
+┌─────────────┐
+│   Model     │  ◄──  State container
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Update    │  ◄──  Pure update function
+└──────┬──────┘       (Model + Msg → Effects + Updated Model)
+       │
+       ▼
+┌─────────────┐
+│   Effects   │  ◄──  Side effects (HTTP, storage, etc.)
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Runtime   │  ◄──  Executes effects automatically
+└─────────────┘
+```
+
+<Steps>
+  <Step title="Model holds state">
+    Your application state is stored in a `Model` (like `Ctx` for context)
+  </Step>
+  <Step title="Actions trigger updates">
+    User actions are dispatched as `Action` messages to the runtime
+  </Step>
+  <Step title="Update function returns effects">
+    The model's `update()` method processes messages and returns effects
+  </Step>
+  <Step title="Runtime executes effects">
+    The runtime automatically handles effects (HTTP requests, storage, etc.)
+  </Step>
+  <Step title="Events flow back">
+    Effects resolve to new messages, creating a unidirectional data flow
+  </Step>
+</Steps>
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="Building a Full Stremio Client">
+    Use the complete `Ctx` model with the `Runtime` to build a full-featured Stremio application with user authentication, library management, streaming, and add-ons.
+  </Accordion>
+  
+  <Accordion title="Creating Add-ons">
+    Use the `types` module to ensure your add-on uses the correct data structures and protocols when communicating with Stremio.
+  </Accordion>
+  
+  <Accordion title="Integrating into Existing Apps">
+    Pick and choose the models you need. For example, use just the `Player` model to add Stremio playback to your app.
+  </Accordion>
+  
+  <Accordion title="Cross-Platform Development">
+    Implement the `Env` trait for your platform to provide fetch and storage capabilities, then use the same core logic everywhere.
+  </Accordion>
+</AccordionGroup>
+
+## Platform Support
+
+Stremio Core is designed to work across multiple platforms:
+
+- **Native applications**: Desktop (Windows, macOS, Linux) and mobile (iOS, Android)
+- **WebAssembly**: Browser-based applications
+- **Servers**: Backend services and APIs
+
+<Warning>
+  When targeting WASM, do not enable the `env-future-send` feature as it requires the `Send` trait which is not supported in WASM environments.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Add Stremio Core to your project and configure features
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first Stremio Core application
+  </Card>
+</CardGroup>

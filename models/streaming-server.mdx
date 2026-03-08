@@ -1,0 +1,551 @@
+---
+title: 'Streaming Server'
+description: 'Torrent streaming, device casting, and remote playback management'
+icon: 'server'
+---
+
+## Overview
+
+The `StreamingServer` model manages communication with Stremio's streaming server for torrent streaming, device casting, transcoding, and network configuration.
+
+## Structure
+
+```rust
+pub struct StreamingServer {
+    pub selected: Selected,
+    pub settings: Loadable<Settings, EnvError>,
+    pub base_url: Option<Url>,
+    pub remote_url: Option<Url>,
+    pub playback_devices: Loadable<Vec<PlaybackDevice>, EnvError>,
+    pub network_info: Loadable<NetworkInfo, EnvError>,
+    pub device_info: Loadable<DeviceInfo, EnvError>,
+    pub torrent: Option<(InfoHash, Loadable<ResourcePath, EnvError>)>,
+    pub statistics: Option<Loadable<Statistics, EnvError>>,
+}
+```
+
+## Selected
+
+Tracks current server connection:
+
+```rust
+pub struct Selected {
+    pub transport_url: Url,
+    pub statistics: Option<StatisticsRequest>,
+}
+```
+
+## Settings
+
+Server configuration:
+
+```rust
+pub struct Settings {
+    pub cache_size: Option<f64>,
+    pub bt_max_connections: u64,
+    pub bt_handshake_timeout: u64,
+    pub bt_request_timeout: u64,
+    pub bt_download_speed_soft_limit: f64,
+    pub bt_download_speed_hard_limit: f64,
+    pub bt_min_peers_for_stable: u64,
+    pub remote_https: Option<String>,
+    pub proxy_streams_enabled: bool,
+    pub transcode_profile: Option<String>,
+}
+```
+
+### Update Settings
+
+```rust
+Msg::Action(Action::StreamingServer(
+    ActionStreamingServer::UpdateSettings(settings)
+))
+```
+
+<Steps>
+  <Step title="Validate Settings">
+    Ensures settings are valid and server is ready
+  </Step>
+  
+  <Step title="Send to Server">
+    POSTs settings to `/settings` endpoint
+  </Step>
+  
+  <Step title="Update Remote URL">
+    If `remote_https` is set, fetches HTTPS endpoint
+  </Step>
+</Steps>
+
+**Implementation:**
+
+```rust:src/models/streaming_server.rs
+fn set_settings<E: Env + 'static>(url: &Url, settings: &Settings) -> Effect {
+    let body = Body {
+        cache_size: settings.cache_size.to_owned(),
+        bt_max_connections: settings.bt_max_connections,
+        bt_handshake_timeout: settings.bt_handshake_timeout,
+        bt_request_timeout: settings.bt_request_timeout,
+        bt_download_speed_soft_limit: settings.bt_download_speed_soft_limit,
+        bt_download_speed_hard_limit: settings.bt_download_speed_hard_limit,
+        bt_min_peers_for_stable: settings.bt_min_peers_for_stable,
+        remote_https: settings.remote_https.to_owned(),
+        proxy_streams_enabled: settings.proxy_streams_enabled,
+        transcode_profile: settings.transcode_profile.to_owned(),
+    };
+    
+    let endpoint = url.join("settings").expect("url builder failed");
+    let request = Request::post(endpoint.as_str())
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .expect("request builder failed");
+    
+    EffectFuture::Concurrent(
+        E::fetch::<_, SuccessResponse>(request)
+            .map(move |result| {
+                Msg::Internal(Internal::StreamingServerUpdateSettingsResult(
+                    url.clone(),
+                    result,
+                ))
+            })
+    )
+}
+```
+
+## Torrent Management
+
+### Create Torrent from Magnet
+
+```rust
+Msg::Action(Action::StreamingServer(
+    ActionStreamingServer::CreateTorrent(
+        CreateTorrentArgs::Magnet(magnet_url)
+    )
+))
+```
+
+<Steps>
+  <Step title="Parse Magnet">
+    Extracts info hash and tracker list
+  </Step>
+  
+  <Step title="Create on Server">
+    Sends magnet to streaming server
+  </Step>
+  
+  <Step title="Generate Resource Path">
+    Creates `bt:{infohash}` path for playback
+  </Step>
+</Steps>
+
+**Magnet Parsing:**
+
+```rust:src/models/streaming_server.rs
+fn parse_magnet(magnet: &Url) -> Result<(InfoHash, Vec<String>), MagnetError> {
+    let (magnet, hash_vec) = decode_btih(magnet.as_str())?;
+    
+    let mut hash: [u8; 20] = [0_u8; 20];
+    if hash_vec.len() != 20 {
+        return Err(MagnetError::NotAMagnetURL);
+    }
+    hash.copy_from_slice(&hash_vec[..20]);
+    
+    let info_hash = InfoHash::new(hash);
+    let announce = magnet.trackers();
+    
+    Ok((info_hash, announce.to_vec()))
+}
+
+fn decode_btih(magnet_uri: &str) -> Result<(Magnet, Vec<u8>), Box<dyn std::error::Error>> {
+    let magnet = Magnet::new(magnet_uri)?;
+    let hash_str = magnet.hash().ok_or("No hash found")?;
+    
+    let decoded = match hash_str.len() {
+        32 | 52 => data_encoding::BASE32.decode(hash_str.as_bytes())?,
+        40 | 64 if hash_str.chars().all(|c| c.is_ascii_hexdigit()) => {
+            hex::decode(hash_str.as_bytes())?
+        }
+        _ => return Err(format!("Unrecognized hash format: {}", hash_str).into()),
+    };
+    
+    Ok((magnet, decoded))
+}
+```
+
+### Create Torrent from File
+
+```rust
+Msg::Action(Action::StreamingServer(
+    ActionStreamingServer::CreateTorrent(
+        CreateTorrentArgs::File(torrent_bytes)
+    )
+))
+```
+
+**Torrent Parsing:**
+
+```rust:src/models/streaming_server.rs
+fn parse_torrent(torrent: &[u8]) -> Result<(InfoHash, Vec<String>), serde_bencode::Error> {
+    #[derive(Deserialize)]
+    struct TorrentFile {
+        info: serde_bencode::value::Value,
+        #[serde(default)]
+        announce: Option<String>,
+        #[serde(default, rename = "announce-list")]
+        announce_list: Option<Vec<Vec<String>>>,
+    }
+    
+    let torrent_file = serde_bencode::from_bytes::<TorrentFile>(torrent)?;
+    let info_bytes = serde_bencode::to_bytes(&torrent_file.info)?;
+    
+    let mut hasher = Sha1::new();
+    hasher.update(info_bytes);
+    let info_hash = InfoHash::new(hasher.finalize().into());
+    
+    let mut announce = vec![];
+    if let Some(a) = torrent_file.announce {
+        announce.push(a);
+    }
+    if let Some(lists) = torrent_file.announce_list {
+        for list in lists {
+            announce.extend(list);
+        }
+    }
+    announce.dedup();
+    
+    Ok((info_hash, announce))
+}
+```
+
+### Torrent State
+
+After successful creation:
+
+```rust
+self.torrent = Some((info_hash, Loadable::Ready(ResourcePath {
+    resource: "meta".to_owned(),
+    r#type: "other".to_owned(),
+    id: format!("bt:{}", info_hash),
+    extra: vec![],
+})));
+```
+
+## Statistics
+
+Monitor torrent download progress:
+
+```rust
+pub struct StatisticsRequest {
+    pub info_hash: String,
+    pub file_idx: Option<usize>,
+}
+
+pub struct Statistics {
+    pub info_hash: String,
+    pub downloaded: u64,
+    pub uploaded: u64,
+    pub download_speed: f64,
+    pub upload_speed: f64,
+    pub peers: u64,
+    pub seeders: u64,
+}
+```
+
+### Get Statistics
+
+```rust
+Msg::Action(Action::StreamingServer(
+    ActionStreamingServer::GetStatistics(StatisticsRequest {
+        info_hash: "abc123...".to_string(),
+        file_idx: Some(0),
+    })
+))
+```
+
+**Implementation:**
+
+```rust:src/models/streaming_server.rs
+fn get_torrent_statistics<E: Env + 'static>(
+    url: &Url,
+    request: &StatisticsRequest,
+) -> Effect {
+    let fetch_fut = async move {
+        let req = TorrentStatisticsRequest {
+            server_url: url.clone(),
+            request: request.clone(),
+        };
+        
+        let statistics: Option<Statistics> = E::fetch(req.into()).await?;
+        Ok(statistics)
+    };
+    
+    EffectFuture::Concurrent(
+        fetch_fut
+            .map(move |result| {
+                Msg::Internal(Internal::StreamingServerStatisticsResult(
+                    (url.clone(), request.clone()),
+                    result,
+                ))
+            })
+    )
+}
+```
+
+<Note>
+Statistics return `None` when torrent is fully downloaded, signaling completion.
+</Note>
+
+## Device Casting
+
+### Playback Devices
+
+```rust
+pub struct PlaybackDevice {
+    pub id: String,
+    pub name: String,
+    pub r#type: String,  // "chromecast", "dlna", "airplay", etc.
+}
+```
+
+Loaded on initialization from `/casting` endpoint.
+
+### Play on Device
+
+```rust
+pub struct PlayOnDeviceArgs {
+    pub device: String,     // Device ID
+    pub source: String,     // Playback URL
+    pub time: Option<u64>,  // Start time in ms
+}
+
+Msg::Action(Action::StreamingServer(
+    ActionStreamingServer::PlayOnDevice(PlayOnDeviceArgs {
+        device: "chromecast-living-room".to_string(),
+        source: "http://localhost:11470/stream.mp4".to_string(),
+        time: Some(120000),  // Start at 2 minutes
+    })
+))
+```
+
+**Validation:**
+
+```rust:src/models/streaming_server.rs
+match Url::parse(&args.source).is_ok() {
+    true => match &mut self.playback_devices {
+        Loadable::Ready(devices) => {
+            let device_exists = devices
+                .iter()
+                .any(|d| d.id == args.device);
+            
+            if device_exists {
+                Effects::one(play_on_device::<E>(&self.selected.transport_url, args))
+            } else {
+                Effects::none().unchanged()
+            }
+        }
+        _ => Effects::none().unchanged(),
+    },
+    _ => Effects::none().unchanged(),
+}
+```
+
+## Network Information
+
+```rust
+pub struct NetworkInfo {
+    pub local_ip: String,
+    pub public_ip: String,
+    pub port: u16,
+}
+
+pub struct DeviceInfo {
+    pub name: String,
+    pub os: String,
+    pub version: String,
+}
+```
+
+Both loaded on initialization.
+
+## Remote HTTPS
+
+For remote access with HTTPS:
+
+<Steps>
+  <Step title="Configure Remote IP">
+    Set `settings.remote_https` to public IP address
+  </Step>
+  
+  <Step title="Get HTTPS Endpoint">
+    Calls `/get-https?authKey=...&ipAddress=...`
+  </Step>
+  
+  <Step title="Update Remote URL">
+    Sets `remote_url` to HTTPS domain
+  </Step>
+</Steps>
+
+```rust:src/models/streaming_server.rs
+fn get_https_endpoint<E: Env + 'static>(
+    url: &Url,
+    auth_key: &AuthKey,
+    ip_address: &String,
+) -> Effect {
+    let endpoint = url.join(&format!(
+        "/get-https?authKey={}&ipAddress={}",
+        auth_key, ip_address,
+    )).expect("url builder failed");
+    
+    let request = Request::get(endpoint.as_str())
+        .body(())
+        .expect("request builder failed");
+    
+    EffectFuture::Concurrent(
+        E::fetch::<_, GetHTTPSResponse>(request)
+            .map(move |result| {
+                Msg::Internal(Internal::StreamingServerGetHTTPSResult(
+                    url.clone(),
+                    result,
+                ))
+            })
+    )
+}
+
+fn update_remote_url<E: Env + 'static>(
+    remote_url: &mut Option<Url>,
+    selected: &Selected,
+    settings: &Settings,
+    ctx: &Ctx,
+) -> Effects {
+    match (settings.remote_https.as_ref(), ctx.profile.auth_key()) {
+        (Some(ip_address), Some(auth_key)) if !ip_address.is_empty() => {
+            Effects::one(get_https_endpoint::<E>(
+                &selected.transport_url,
+                auth_key,
+                ip_address,
+            ))
+        }
+        _ => eq_update(remote_url, None),
+    }
+}
+```
+
+## Initialization
+
+On model creation:
+
+```rust:src/models/streaming_server.rs
+impl StreamingServer {
+    pub fn new<E: Env + 'static>(profile: &Profile) -> (Self, Effects) {
+        let effects = Effects::many(vec![
+            get_settings::<E>(&profile.settings.streaming_server_url),
+            get_playback_devices::<E>(&profile.settings.streaming_server_url),
+            get_network_info::<E>(&profile.settings.streaming_server_url),
+            get_device_info::<E>(&profile.settings.streaming_server_url),
+        ]);
+        
+        (
+            Self {
+                selected: Selected {
+                    transport_url: profile.settings.streaming_server_url.to_owned(),
+                    statistics: None,
+                },
+                settings: Loadable::Loading,
+                base_url: None,
+                remote_url: None,
+                playback_devices: Loadable::Loading,
+                network_info: Loadable::Loading,
+                device_info: Loadable::Loading,
+                torrent: None,
+                statistics: None,
+            },
+            effects.unchanged(),
+        )
+    }
+}
+```
+
+## Reload
+
+Refresh all server data:
+
+```rust
+Msg::Action(Action::StreamingServer(ActionStreamingServer::Reload))
+```
+
+Clears current state and re-fetches settings, devices, and network info.
+
+## Usage Example
+
+```rust
+use stremio_core::models::streaming_server::StreamingServer;
+use stremio_core::runtime::msg::{Action, ActionStreamingServer, CreateTorrentArgs};
+
+// Initialize
+let (server, effects) = StreamingServer::new::<MyEnv>(&ctx.profile);
+
+// Create torrent from magnet
+let magnet = Url::parse(
+    "magnet:?xt=urn:btih:abc123...&tr=udp://tracker.example.com:80"
+).unwrap();
+
+runtime.dispatch(Msg::Action(
+    Action::StreamingServer(
+        ActionStreamingServer::CreateTorrent(
+            CreateTorrentArgs::Magnet(magnet)
+        )
+    )
+));
+
+// Wait for torrent to be created
+// server.torrent will contain (InfoHash, ResourcePath)
+
+// Monitor download progress
+if let Some((info_hash, _)) = &server.torrent {
+    runtime.dispatch(Msg::Action(
+        Action::StreamingServer(
+            ActionStreamingServer::GetStatistics(StatisticsRequest {
+                info_hash: info_hash.to_string(),
+                file_idx: Some(0),
+            })
+        )
+    ));
+}
+
+// Play on Chromecast
+if let Some(chromecast) = server.playback_devices
+    .as_ref()
+    .and_then(|devices| devices.iter().find(|d| d.r#type == "chromecast")) 
+{
+    runtime.dispatch(Msg::Action(
+        Action::StreamingServer(
+            ActionStreamingServer::PlayOnDevice(PlayOnDeviceArgs {
+                device: chromecast.id.clone(),
+                source: "http://localhost:11470/stream.mp4".to_string(),
+                time: None,
+            })
+        )
+    ));
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Statistics Polling">
+    Statistics should be polled periodically (e.g., every 1-2 seconds) during active downloads. When statistics return `None`, the download is complete.
+  </Accordion>
+  
+  <Accordion title="URL Changes">
+    When `profile.settings.streaming_server_url` changes, the StreamingServer model automatically reloads all data from the new server.
+  </Accordion>
+  
+  <Accordion title="Error Recovery">
+    If any initial request fails (settings, devices, network), all loadables are set to error state. Use Reload action to retry.
+  </Accordion>
+</AccordionGroup>
+
+## Related Models
+
+- [Player](/models/player) - Stream consumption
+- [Context](/models/context) - Profile and settings
+- [MetaDetails](/models/meta-details) - Torrent metadata

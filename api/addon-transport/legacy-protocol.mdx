@@ -1,0 +1,375 @@
+---
+title: 'Legacy Protocol'
+description: 'Legacy addon protocol adapter with JSON-RPC support'
+---
+
+## Overview
+
+The `AddonLegacyTransport` provides backward compatibility with Stremio's legacy addon protocol, which uses JSON-RPC over HTTP. This adapter translates modern `ResourcePath` requests into legacy JSON-RPC calls.
+
+## Protocol Details
+
+### Legacy URL Format
+
+Legacy addons use URLs ending with `/stremio/v1` and communicate via JSON-RPC requests:
+
+```
+https://addon.example.com/stremio/v1/q.json?b={base64_encoded_request}
+```
+
+The `b` parameter contains a base64-encoded JSON-RPC request object.
+
+<Warning>
+  The legacy protocol uses standard base64 encoding (not URL-safe), replicating a historical implementation detail for compatibility.
+</Warning>
+
+### JSON-RPC Request Format
+
+```json
+{
+  "params": [null, {/* method-specific parameters */}],
+  "method": "method.name",
+  "id": 1,
+  "jsonrpc": "2.0"
+}
+```
+
+## Implementation
+
+### Structure
+
+```rust
+pub struct AddonLegacyTransport<'a, T: Env> {
+    env: PhantomData<T>,
+    transport_url: &'a Url,
+}
+```
+
+**Fields:**
+- `transport_url` - Reference to the addon's base URL
+- `env` - Phantom data for environment type parameter
+
+### Constructor
+
+```rust
+pub fn new(transport_url: &'a Url) -> Self
+```
+
+Creates a new legacy transport adapter.
+
+**Example:**
+```rust
+let url = Url::parse("https://legacy-addon.example.com/stremio/v1")?;
+let transport = AddonLegacyTransport::<MyEnv>::new(&url);
+```
+
+## Supported Methods
+
+The legacy adapter supports the following JSON-RPC methods:
+
+### Catalog (meta.find)
+
+Lists metadata items from a catalog.
+
+**Request Parameters:**
+```json
+{
+  "query": { "type": "movie", "genre": "action" },
+  "limit": 100,
+  "skip": 0,
+  "sort": { "popularity": -1 }
+}
+```
+
+**Response:** Array of `MetaItemPreview`
+
+**Modern to Legacy Mapping:**
+- `ResourcePath.type` → `query.type`
+- `extra.genre` → `query.genre`
+- `extra.skip` → `skip` parameter
+- Catalog ID determines sort order ("top" uses popularity, others use catalog ID)
+
+### Meta (meta.get)
+
+Retrieves detailed metadata for a single item.
+
+**Request Parameters:**
+```json
+{
+  "query": { "imdb_id": "tt1254207" }
+}
+```
+
+**Response:** Single `MetaItem`
+
+**ID Format Translation:**
+- IMDb: `tt1254207` → `{"imdb_id": "tt1254207"}`
+- YouTube: `UC123456` → `{"yt_id": "UC123456"}`
+- Custom: `custom:value` → `{"custom": "value"}`
+
+### Stream (stream.find)
+
+Finds available streams for a video.
+
+**Request Parameters:**
+```json
+{
+  "query": {
+    "imdb_id": "tt0386676",
+    "season": 5,
+    "episode": 1,
+    "type": "series"
+  }
+}
+```
+
+**Response:** Array of `Stream`
+
+**ID Format for Episodes:**
+- Format: `{imdb_id}:{season}:{episode}`
+- Example: `tt0386676:5:1` → `{"imdb_id": "tt0386676", "season": 5, "episode": 1}`
+
+### Subtitles (subtitles.find)
+
+Finds subtitles for a video file.
+
+**Request Parameters:**
+```json
+{
+  "query": {
+    "itemHash": "tt0386676 5 1",
+    "videoHash": "abc123def456",
+    "videoSize": 1000000000,
+    "videoFilename": "video.mp4"
+  }
+}
+```
+
+**Response:** Object with `id` and `all` array of `Subtitles`
+
+**Parameter Mapping:**
+- `ResourcePath.id` → `itemHash` (colons replaced with spaces)
+- `extra.videoHash` → `videoHash`
+- `extra.videoSize` → `videoSize`
+- `extra.videoFilename` → `videoFilename`
+
+## Manifest Handling
+
+### Fetching Legacy Manifests
+
+```rust
+fn manifest(&self) -> TryEnvFuture<Manifest>
+```
+
+Fetches the addon manifest using the legacy `meta` method.
+
+**Request URL:**
+```
+/q.json?b=eyJwYXJhbXMiOltdLCJtZXRob2QiOiJtZXRhIiwiaWQiOjEsImpzb25ycGMiOiIyLjAifQ==
+```
+
+The base64 string decodes to:
+```json
+{"params":[],"method":"meta","id":1,"jsonrpc":"2.0"}
+```
+
+### Legacy Manifest Structure
+
+```rust
+pub struct LegacyManifest {
+    id: String,
+    name: String,
+    description: Option<String>,
+    logo: Option<String>,
+    background: Option<String>,
+    version: Version,
+    methods: Vec<String>,        // e.g. ["meta.get", "stream.find"]
+    types: Vec<String>,          // e.g. ["movie", "series"]
+    contact_email: Option<String>,
+    id_property: Option<LegacyIdProperty>,
+    sorts: Option<Vec<LegacySort>>,
+}
+```
+
+### Manifest Translation
+
+The adapter converts legacy manifests to modern format:
+
+**Methods → Resources:**
+- `meta.get` → `"meta"` resource
+- `stream.find` → `"stream"` resource
+- `subtitles.get` → `"subtitles"` resource
+
+**ID Property → ID Prefixes:**
+- `"imdb_id"` → `"tt"`
+- `"yt_id"` → `"UC"`
+- Other → `"{property}:"`
+
+**Sorts → Catalogs:**
+
+If the addon supports `meta.find`, catalogs are generated:
+
+<CodeGroup>
+```json With Sorts
+// Legacy sorts define multiple catalogs
+{
+  "sorts": [
+    { "prop": "trending", "name": "Trending", "types": ["movie"] },
+    { "prop": "popular", "name": "Popular" }
+  ]
+}
+
+// Generates catalogs:
+// - trending/movie
+// - popular/movie
+// - popular/series (for each type)
+```
+
+```json Without Sorts
+// Without sorts, creates default "top" catalog
+{
+  "types": ["movie", "series"]
+}
+
+// Generates catalogs:
+// - top/movie
+// - top/series
+```
+</CodeGroup>
+
+## ID Format Handling
+
+The legacy protocol uses a flexible ID format that the adapter translates:
+
+### IMDb Format
+
+```rust
+// Pattern: tt{digits}(:{season}:{episode})?
+"tt1254207"        → {"imdb_id": "tt1254207"}
+"tt0386676:5:1"   → {"imdb_id": "tt0386676", "season": 5, "episode": 1}
+```
+
+### YouTube Format
+
+```rust
+// Pattern: UC{chars}(:{video_id})?
+"UC123456"        → {"yt_id": "UC123456"}
+"UC123456:video1" → {"yt_id": "UC123456", "video_id": "video1"}
+```
+
+### Custom Format
+
+```rust
+// Pattern: {prefix}:{id}(:{video_id})?
+"custom:test"       → {"custom": "test"}
+"custom:test:vid1"  → {"custom": "test", "video_id": "vid1"}
+```
+
+## Error Handling
+
+### Error Types
+
+```rust
+pub enum LegacyErr {
+    JsonRPC(JsonRPCErr),      // JSON-RPC error response
+    UnsupportedResource,      // Resource not supported by legacy protocol
+    UnsupportedRequest,       // Invalid request format
+}
+```
+
+### JSON-RPC Errors
+
+```rust
+pub struct JsonRPCErr {
+    message: String,
+    code: i64,
+}
+```
+
+JSON-RPC errors are converted to `EnvError::AddonTransport` with formatted message:
+```
+rpc error {code}: {message}
+```
+
+## Limitations
+
+<Warning>
+  The legacy adapter has intentional limitations to avoid complexity:
+</Warning>
+
+**Not Supported:**
+- Search functionality (`meta.search`) - only one known legacy addon used this
+- Some subtitles addons - modern protocol is preferred
+
+**Supported Features:**
+- Catalog browsing with genre filtering
+- Metadata retrieval
+- Stream finding for movies and series
+- Subtitles with video hash matching
+
+## Example Usage
+
+### Catalog Request
+
+```rust
+let path = ResourcePath {
+    resource: "catalog".to_string(),
+    r#type: "movie".to_string(),
+    id: "trending".to_string(),
+    extra: vec![ExtraValue {
+        name: "genre".to_string(),
+        value: "action".to_string(),
+    }],
+};
+
+let response = transport.resource(&path).await?;
+```
+
+Generates request:
+```
+/stremio/v1/q.json?b=eyJpZCI6MSwianNvbnJwYyI6IjIuMCIsIm1ldGhvZCI6Im1ldGEuZmluZCIsInBhcmFtcyI6W251bGwseyJsaW1pdCI6MTAwLCJxdWVyeSI6eyJnZW5yZSI6ImFjdGlvbiIsInR5cGUiOiJtb3ZpZSJ9LCJza2lwIjowLCJzb3J0Ijp7InBvcHVsYXJpdHkiOi0xLCJ0cmVuZGluZyI6LTF9fV19
+```
+
+### Stream Request
+
+```rust
+let path = ResourcePath::without_extra(
+    "stream",
+    "series",
+    "tt0386676:5:1"
+);
+
+let response = transport.resource(&path).await?;
+```
+
+Generates JSON-RPC call:
+```json
+{
+  "method": "stream.find",
+  "params": [null, {
+    "query": {
+      "imdb_id": "tt0386676",
+      "season": 5,
+      "episode": 1,
+      "type": "series"
+    }
+  }]
+}
+```
+
+## Source Reference
+
+- Legacy transport: `src/addon_transport/http_transport/legacy/mod.rs`
+- Manifest conversion: `src/addon_transport/http_transport/legacy/legacy_manifest.rs`
+- Main HTTP transport: `src/addon_transport/http_transport/http_transport.rs`
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="HTTP Transport" icon="globe" href="./http-transport">
+    Modern HTTP transport implementation
+  </Card>
+  <Card title="Addon Transport Trait" icon="plug" href="../addon-transport">
+    Core transport interface definition
+  </Card>
+</CardGroup>

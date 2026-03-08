@@ -1,0 +1,369 @@
+---
+title: 'Library'
+description: 'Library management with filtering, sorting, and pagination'
+icon: 'books'
+---
+
+## Overview
+
+The `LibraryWithFilters` model provides a filtered, sorted, and paginated view of the user's library. It supports different filter types and sorting strategies for organizing media collections.
+
+## Structure
+
+```rust
+pub struct LibraryWithFilters<F> {
+    pub selected: Option<Selected>,
+    pub selectable: Selectable,
+    pub catalog: Vec<LibraryItem>,
+    pub filter: PhantomData<F>,
+}
+```
+
+## LibraryItem
+
+Represents a single item in the user's library:
+
+```rust
+pub struct LibraryItem {
+    pub id: LibraryItemId,
+    pub name: String,
+    pub r#type: String,
+    pub poster: Option<Url>,
+    pub poster_shape: PosterShape,
+    pub removed: bool,
+    pub temp: bool,
+    pub ctime: Option<DateTime<Utc>>,
+    pub mtime: DateTime<Utc>,
+    pub state: LibraryItemState,
+    pub behavior_hints: MetaItemBehaviorHints,
+}
+```
+
+### LibraryItemState
+
+```rust
+pub struct LibraryItemState {
+    pub last_watched: Option<DateTime<Utc>>,
+    pub time_offset: u64,
+    pub duration: u64,
+    pub video_id: Option<String>,
+    pub watched: Option<WatchedField>,
+    pub last_vid_released: Option<DateTime<Utc>>,
+    pub no_notif: bool,
+    pub flagged_watched: u32,
+    pub times_watched: u32,
+    pub time_watched: u64,
+    pub overall_time_watched: u64,
+}
+```
+
+## Filter Types
+
+### ContinueWatchingFilter
+
+Shows items currently being watched:
+
+```rust
+impl LibraryFilter for ContinueWatchingFilter {
+    fn predicate(library_item: &LibraryItem, notifications: &NotificationsBucket) -> bool {
+        let has_notification = notifications
+            .items
+            .get(&library_item.id)
+            .filter(|notifs| !notifs.is_empty())
+            .is_some();
+        
+        library_item.is_in_continue_watching() || has_notification
+    }
+}
+```
+
+**Include items that:**
+- Have `time_offset > 0` (started watching)
+- Are not removed or are temporary
+- Type is not "other"
+- Have pending notifications
+
+### NotRemovedFilter
+
+Shows all active library items:
+
+```rust
+impl LibraryFilter for NotRemovedFilter {
+    fn predicate(library_item: &LibraryItem, _: &NotificationsBucket) -> bool {
+        !library_item.removed
+    }
+}
+```
+
+## Sorting Options
+
+```rust
+pub enum Sort {
+    LastWatched,      // Most recently watched first
+    Name,             // Alphabetical A-Z
+    NameReverse,      // Alphabetical Z-A
+    TimesWatched,     // Most watched first
+    Watched,          // Watched items first, then by last_watched
+    NotWatched,       // Unwatched items first
+}
+```
+
+### Sort Implementation
+
+```rust:src/models/library_with_filters.rs
+impl Sort {
+    pub fn sort_items(&self, a: &LibraryItem, b: &LibraryItem) -> Ordering {
+        match self {
+            Sort::LastWatched => 
+                b.state.last_watched.cmp(&a.state.last_watched),
+            
+            Sort::TimesWatched => 
+                b.state.times_watched.cmp(&a.state.times_watched),
+            
+            Sort::Watched => 
+                b.watched()
+                    .cmp(&a.watched())
+                    .then(b.state.last_watched.cmp(&a.state.last_watched))
+                    .then(b.ctime.cmp(&a.ctime)),
+            
+            Sort::NotWatched => 
+                a.watched()
+                    .cmp(&b.watched())
+                    .then(a.state.last_watched.cmp(&b.state.last_watched))
+                    .then(a.ctime.cmp(&b.ctime)),
+            
+            Sort::Name => 
+                a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            
+            Sort::NameReverse => 
+                b.name.to_lowercase().cmp(&a.name.to_lowercase()),
+        }
+    }
+}
+```
+
+## Request & Response Models
+
+### LibraryRequest
+
+```rust
+pub struct LibraryRequest {
+    pub r#type: Option<String>,  // "movie", "series", etc.
+    pub sort: Sort,
+    pub page: LibraryRequestPage,
+}
+```
+
+### Selectable Types
+
+Provide UI-ready filter and sort options:
+
+```rust
+pub struct SelectableType {
+    pub r#type: Option<String>,
+    pub selected: bool,
+    pub request: LibraryRequest,
+}
+
+pub struct SelectableSort {
+    pub sort: Sort,
+    pub selected: bool,
+    pub request: LibraryRequest,
+}
+
+pub struct SelectablePage {
+    pub request: LibraryRequest,  // For next page
+}
+
+pub struct Selectable {
+    pub types: Vec<SelectableType>,
+    pub sorts: Vec<SelectableSort>,
+    pub next_page: Option<SelectablePage>,
+}
+```
+
+## Actions
+
+### Load Library
+
+```rust
+Msg::Action(Action::Load(ActionLoad::LibraryWithFilters(selected)))
+```
+
+<Steps>
+  <Step title="Update Selection">
+    Sets the current filter, sort, and page
+  </Step>
+  
+  <Step title="Update Selectables">
+    Rebuilds available types and sorts based on current library
+  </Step>
+  
+  <Step title="Update Catalog">
+    Filters, sorts, and paginates items
+  </Step>
+</Steps>
+
+### Load Next Page
+
+```rust
+Msg::Action(Action::LibraryWithFilters(ActionLibraryWithFilters::LoadNextPage))
+```
+
+Increments page number and appends more items to the catalog.
+
+## Pagination
+
+Pages are 1-indexed and use `CATALOG_PAGE_SIZE` (typically 100 items):
+
+```rust
+pub struct LibraryRequestPage(pub NonZeroUsize);
+
+impl Default for LibraryRequestPage {
+    fn default() -> Self {
+        LibraryRequestPage(NonZeroUsize::new(1).unwrap())
+    }
+}
+```
+
+**Next Page Calculation:**
+
+```rust:src/models/library_with_filters.rs
+let next_page = library
+    .items
+    .values()
+    .filter(|item| F::predicate(item, notifications))
+    .filter(|item| matches_type_filter(item, &selected.request.r#type))
+    .nth(selected.request.page.get() * CATALOG_PAGE_SIZE)
+    .map(|_| SelectablePage {
+        request: LibraryRequest {
+            page: LibraryRequestPage(
+                NonZeroUsize::new(selected.request.page.get() + 1).unwrap()
+            ),
+            ..selected.request.to_owned()
+        },
+    });
+```
+
+## LibraryItem Methods
+
+### Watching Status
+
+```rust
+impl LibraryItem {
+    /// Check if item should appear in Continue Watching
+    pub fn is_in_continue_watching(&self) -> bool {
+        self.r#type != "other" 
+            && (!self.removed || self.temp) 
+            && self.state.time_offset > 0
+    }
+    
+    /// Get watch progress percentage
+    pub fn progress(&self) -> f64 {
+        if self.state.time_offset > 0 && self.state.duration > 0 {
+            (self.state.time_offset as f64 / self.state.duration as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+    
+    /// Check if watched at least once
+    pub fn watched(&self) -> bool {
+        self.state.times_watched > 0
+    }
+}
+```
+
+### Marking as Watched
+
+```rust
+pub fn mark_as_watched<E: Env>(&mut self, is_watched: bool) {
+    if is_watched {
+        self.state.times_watched = self.state.times_watched.saturating_add(1);
+        self.state.last_watched = Some(E::now());
+    } else {
+        self.state.times_watched = 0;
+    }
+}
+
+pub fn mark_video_as_watched<E: Env>(
+    &mut self,
+    watched: &WatchedBitField,
+    video: &Video,
+    is_watched: bool,
+) {
+    let mut watched = watched.to_owned();
+    watched.set_video(&video.id, is_watched);
+    self.state.watched = Some(watched.into());
+    // Updates last_watched if newer than current
+}
+```
+
+### Notifications
+
+```rust
+pub fn should_pull_notifications(&self) -> bool {
+    !self.state.no_notif
+        && self.r#type != "other"
+        && self.r#type != "movie"
+        && self.behavior_hints.default_video_id.is_none()
+        && !self.removed
+        && !self.temp
+}
+```
+
+<Note>
+Notifications are pulled only for series (not movies) that are actively in the user's library and don't have a default video set.
+</Note>
+
+## Usage Example
+
+```rust
+use stremio_core::models::library_with_filters::{
+    LibraryWithFilters, NotRemovedFilter, Sort, LibraryRequest
+};
+
+// Initialize library model
+let (library_model, effects) = LibraryWithFilters::<NotRemovedFilter>::new(
+    &ctx.library,
+    &ctx.notifications
+);
+
+// Load first page of movies sorted by last watched
+let request = LibraryRequest {
+    r#type: Some("movie".to_string()),
+    sort: Sort::LastWatched,
+    page: LibraryRequestPage::default(),
+};
+
+runtime.dispatch(Msg::Action(
+    Action::Load(ActionLoad::LibraryWithFilters(Selected { request }))
+));
+
+// Access filtered catalog
+for item in &library_model.catalog {
+    println!("{}: {}% watched", item.name, item.progress());
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Type Priorities">
+    Types are sorted by priority: movie, series, channel, tv, then others. This ensures consistent ordering in the UI.
+  </Accordion>
+  
+  <Accordion title="Efficient Updates">
+    The model only recalculates selectables and catalog when the underlying library changes or when explicitly requested.
+  </Accordion>
+  
+  <Accordion title="Temporary Items">
+    Items with `temp: true` and `removed: true` are automatically cleaned up after being marked as watched.
+  </Accordion>
+</AccordionGroup>
+
+## Related Models
+
+- [Context](/models/context) - Library bucket storage
+- [MetaDetails](/models/meta-details) - Individual item details
+- [Player](/models/player) - Playback and watch progress

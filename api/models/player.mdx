@@ -1,0 +1,531 @@
+---
+title: 'Player'
+description: 'Model for managing video playback state and interactions'
+---
+
+## Overview
+
+The `Player` model manages the complete video playback experience. It tracks playback progress, handles stream loading, manages subtitles, implements binge watching features, collects analytics, and syncs watching state to the library. This is the most complex model in Stremio Core.
+
+## Structure
+
+### Fields
+
+<ResponseField name="selected" type="Option<Selected>">
+  Currently selected stream and related metadata
+</ResponseField>
+
+<ResponseField name="video_params" type="Option<VideoParams>">
+  Video file parameters (hash, size, filename) for subtitle matching
+</ResponseField>
+
+<ResponseField name="meta_item" type="Option<ResourceLoadable<MetaItem>>">
+  Meta item being played
+</ResponseField>
+
+<ResponseField name="subtitles" type="Vec<ResourceLoadable<Vec<Subtitles>>>" required>
+  Available subtitles from all addons
+</ResponseField>
+
+<ResponseField name="next_video" type="Option<Video>">
+  Next video to play (for binge watching)
+</ResponseField>
+
+<ResponseField name="next_streams" type="Option<ResourceLoadable<Vec<Stream>>>">
+  Streams loaded for the next video
+</ResponseField>
+
+<ResponseField name="next_stream" type="Option<Stream>">
+  Recommended stream for next video (matches current source)
+</ResponseField>
+
+<ResponseField name="stream" type="Option<Loadable<(StreamUrls, Stream<ConvertedStreamSource>), EnvError>>">
+  Converted stream with playback URLs
+</ResponseField>
+
+<ResponseField name="series_info" type="Option<SeriesInfo>">
+  Series information (season, episode) for current video
+</ResponseField>
+
+<ResponseField name="library_item" type="Option<LibraryItem>">
+  Library item being updated during playback
+</ResponseField>
+
+<ResponseField name="stream_state" type="Option<StreamItemState>">
+  Current playback state stored in streams bucket
+</ResponseField>
+
+<ResponseField name="intro_outro" type="Option<IntroOutro>">
+  Skip intro/outro timing information
+</ResponseField>
+
+<ResponseField name="watched" type="Option<WatchedBitField>">
+  Bitfield tracking watched episodes
+</ResponseField>
+
+<ResponseField name="analytics_context" type="Option<AnalyticsContext>">
+  Context for analytics events
+</ResponseField>
+
+<ResponseField name="load_time" type="Option<DateTime<Utc>>">
+  Timestamp when player started loading
+</ResponseField>
+
+<ResponseField name="push_library_item_time" type="DateTime<Utc>" required>
+  Last time library item was synced (rate-limited to every 90 seconds)
+</ResponseField>
+
+<ResponseField name="loaded" type="bool" required>
+  Whether video has started playing
+</ResponseField>
+
+<ResponseField name="ended" type="bool" required>
+  Whether playback has ended
+</ResponseField>
+
+<ResponseField name="paused" type="Option<bool>">
+  Current pause state
+</ResponseField>
+
+<ResponseField name="seek_history" type="Vec<SeekLog>" required>
+  Seek events for skip gaps analysis
+</ResponseField>
+
+<ResponseField name="skip_gaps" type="Option<(SkipGapsRequest, Loadable<SkipGapsResponse, CtxError>)>">
+  Skip gaps request and response for intro/outro detection
+</ResponseField>
+
+<ResponseField name="collect_seek_logs" type="bool" required>
+  Whether to collect seek history (default: false)
+</ResponseField>
+
+## Selected
+
+<CodeGroup>
+```rust Selected
+pub struct Selected {
+    pub stream: Stream,
+    pub stream_request: Option<ResourceRequest>,
+    pub meta_request: Option<ResourceRequest>,
+    pub subtitles_path: Option<ResourcePath>,
+}
+```
+</CodeGroup>
+
+<ResponseField name="stream" type="Stream" required>
+  The stream being played
+</ResponseField>
+
+<ResponseField name="stream_request" type="Option<ResourceRequest>">
+  Original request used to load this stream
+</ResponseField>
+
+<ResponseField name="meta_request" type="Option<ResourceRequest>">
+  Request to fetch the meta item
+</ResponseField>
+
+<ResponseField name="subtitles_path" type="Option<ResourcePath>">
+  Path to subtitle resource
+</ResponseField>
+
+## VideoParams
+
+<CodeGroup>
+```rust VideoParams
+pub struct VideoParams {
+    pub hash: Option<String>,
+    pub size: Option<u64>,
+    pub filename: Option<String>,
+}
+```
+</CodeGroup>
+
+These parameters are typically retrieved from a streaming server and used for:
+- OpenSubtitles hash matching
+- Better subtitle synchronization
+- Skip gaps detection
+
+## AnalyticsContext
+
+<CodeGroup>
+```rust AnalyticsContext
+pub struct AnalyticsContext {
+    pub id: Option<String>,
+    pub r#type: Option<String>,
+    pub name: Option<String>,
+    pub video_id: Option<String>,
+    pub time: Option<u64>,
+    pub duration: Option<u64>,
+    pub device_type: Option<String>,
+    pub device_name: Option<String>,
+    pub player_duration: Option<u64>,
+    pub player_video_width: u64,
+    pub player_video_height: u64,
+    pub has_trakt: bool,
+}
+```
+</CodeGroup>
+
+This context is included with all analytics events.
+
+## Update Implementation
+
+Implements `UpdateWithCtx<E>` for playback management:
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Load::Player">
+    Loads a stream for playback:
+    - Converts stream to playable URLs
+    - Loads meta item
+    - Loads subtitles
+    - Determines next video for binge watching
+    - Updates library item with current state
+    - Dismisses notifications
+    - Initializes analytics context
+    
+    **Source**: `src/models/player.rs:139`
+  </Accordion>
+
+  <Accordion title="Action::Unload">
+    Stops playback and cleans up:
+    - Emits `Event::PlayerStopped` if not ended
+    - Saves final library item state
+    - Submits seek history
+    - Clears all player state
+    
+    **Source**: `src/models/player.rs:305`
+  </Accordion>
+
+  <Accordion title="Action::Player::VideoParamsChanged">
+    Updates video parameters (hash, size, filename):
+    - Reloads subtitles with new params
+    - Triggers skip gaps detection
+    
+    **Source**: `src/models/player.rs:371`
+  </Accordion>
+
+  <Accordion title="Action::Player::StreamStateChanged">
+    Notifies that stream playback state changed:
+    - Forwards to `Internal::StreamStateChanged`
+    - Updates streams bucket
+    
+    **Source**: `src/models/player.rs:394`
+  </Accordion>
+
+  <Accordion title="Action::Player::Seek">
+    User manually seeks to a position:
+    - Updates library item time_offset and duration
+    - Collects seek log if enabled
+    - Sends Trakt events (paused/playing)
+    - Rate-limited library sync (every 90s)
+    
+    **Source**: `src/models/player.rs:408`
+  </Accordion>
+
+  <Accordion title="Action::Player::TimeChanged">
+    Playback position changed (periodic updates):
+    - Updates time_offset and time_watched
+    - Checks if video should be marked as watched (watched threshold)
+    - Marks videos in watched bitfield
+    - Handles temp/removed flags
+    - Rate-limited library sync
+    
+    **Source**: `src/models/player.rs:475`
+  </Accordion>
+
+  <Accordion title="Action::Player::PausedChanged">
+    Playback paused or resumed:
+    - First unpause emits `Event::PlayerPlaying`
+    - Subsequent changes emit Trakt events
+    - Syncs library item
+    
+    **Source**: `src/models/player.rs:560`
+  </Accordion>
+
+  <Accordion title="Action::Player::NextVideo">
+    User requests to play next video:
+    - Submits seek history with outro time
+    - Updates library item time_offset to 0 or 1
+    - Emits `Event::PlayerNextVideo`
+    
+    **Source**: `src/models/player.rs:596`
+  </Accordion>
+
+  <Accordion title="Action::Player::Ended">
+    Playback ended:
+    - Sets ended flag
+    - Emits `Event::PlayerEnded`
+    
+    **Source**: `src/models/player.rs:637`
+  </Accordion>
+
+  <Accordion title="Action::Player::MarkVideoAsWatched">
+    Manually mark video as watched/unwatched during playback
+    
+    **Source**: `src/models/player.rs:646`
+  </Accordion>
+
+  <Accordion title="Action::Player::MarkSeasonAsWatched">
+    Manually mark entire season as watched/unwatched during playback
+    
+    **Source**: `src/models/player.rs:658`
+  </Accordion>
+
+  <Accordion title="Internal::LibraryChanged">
+    External library change:
+    - Reloads library item
+    - Updates watched bitfield
+    
+    **Source**: `src/models/player.rs:689`
+  </Accordion>
+
+  <Accordion title="Internal::StreamsChanged">
+    Streams bucket changed:
+    - Updates stream_state
+    
+    **Source**: `src/models/player.rs:710`
+  </Accordion>
+
+  <Accordion title="Internal::ResourceRequestResult">
+    Processes resource responses:
+    - Meta item loading
+    - Subtitle loading
+    - Next video streams loading
+    - Updates library item, watched state, skip gaps
+    
+    **Source**: `src/models/player.rs:713`
+  </Accordion>
+
+  <Accordion title="Internal::SkipGapsResult">
+    Processes skip gaps response:
+    - Updates intro/outro timing information
+    
+    **Source**: `src/models/player.rs:836`
+  </Accordion>
+</AccordionGroup>
+
+## Watched Threshold
+
+A video is automatically marked as watched when:
+
+```rust
+time_watched > duration * WATCHED_THRESHOLD_COEF
+```
+
+Where `WATCHED_THRESHOLD_COEF` is typically 0.7 (70%).
+
+**Source**: `src/models/player.rs:522`
+
+## Credits Threshold
+
+When switching videos, if the current position exceeds the credits threshold:
+
+```rust
+time_offset > duration * CREDITS_THRESHOLD_COEF  
+```
+
+The player resets to the beginning (or position 1 if next video exists).
+
+**Source**: `src/models/player.rs:888`
+
+## Library Sync Rate Limiting
+
+Library updates are rate-limited using `PUSH_TO_LIBRARY_EVERY` (90 seconds):
+
+<CodeGroup>
+```rust Rate Limiting
+fn push_to_library<E: Env + 'static>(
+    push_library_item_time: &mut DateTime<Utc>,
+    library_item: &mut LibraryItem,
+) -> Effects {
+    if E::now() - *push_library_item_time >= *PUSH_TO_LIBRARY_EVERY {
+        *push_library_item_time = E::now();
+        Effects::msg(Msg::Internal(Internal::UpdateLibraryItem(
+            library_item.to_owned(),
+        )))
+        .unchanged()
+    } else {
+        Effects::none().unchanged()
+    }
+}
+```
+</CodeGroup>
+
+This prevents excessive API calls during playback.
+
+**Source**: `src/models/player.rs:872`
+
+## Binge Watching
+
+The player automatically determines the next video:
+
+<Steps>
+  <Step title="Find Current Video">
+    Locate current video in meta item's videos array
+  </Step>
+  
+  <Step title="Get Next Video">
+    Select video at position + 1
+  </Step>
+  
+  <Step title="Check Season">
+    Skip if next video is in a different season (unless season is 0)
+  </Step>
+  
+  <Step title="Match Stream">
+    Find stream from same source using `is_binge_match()`
+  </Step>
+</Steps>
+
+**Source**: `src/models/player.rs:939`
+
+## Intro/Outro Skip
+
+Intro/outro detection uses skip gaps API:
+
+1. Requires `video_params` (hash, size, filename)
+2. Requires `series_info` (must be a series)
+3. Sends request to skip gaps service
+4. Receives intro/outro timestamps
+5. Updates `intro_outro` field
+
+**Source**: `src/models/player.rs:1219` (in truncated portion)
+
+## Seek Logs
+
+When `collect_seek_logs` is enabled:
+
+- Records all seek operations before `PLAYER_IGNORE_SEEK_AFTER` time
+- Only for series content
+- Submitted to API on unload or next video
+- Used for improving intro/outro detection
+
+**Source**: `src/models/player.rs:424`
+
+## Events
+
+The player emits:
+
+- `Event::PlayerPlaying { load_time, context }` - Playback started
+- `Event::PlayerStopped { context }` - Playback stopped without ending
+- `Event::PlayerEnded { context, is_binge_enabled, is_playing_next_video }` - Playback ended
+- `Event::PlayerNextVideo { context, is_binge_enabled, is_playing_next_video }` - Next video requested
+- `Event::TraktPlaying { context }` - For Trakt scrobbling
+- `Event::TraktPaused { context }` - For Trakt scrobbling
+
+## Usage Example
+
+<CodeGroup>
+```rust Example: Basic Playback
+use stremio_core::models::player::{Player, Selected};
+use stremio_core::types::resource::Stream;
+use stremio_core::runtime::UpdateWithCtx;
+
+let mut player = Player::default();
+
+// Load a stream
+let selected = Selected {
+    stream: stream,  // Stream from catalog
+    stream_request: Some(stream_request),
+    meta_request: Some(meta_request),
+    subtitles_path: Some(subtitles_path),
+};
+
+let effects = player.update(
+    &Msg::Action(Action::Load(ActionLoad::Player(Box::new(selected)))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Playback Updates
+// Time changed (called periodically, e.g., every second)
+let effects = player.update(
+    &Msg::Action(Action::Player(ActionPlayer::TimeChanged {
+        time: 125000,      // 125 seconds
+        duration: 3600000, // 1 hour
+        device: "web".to_string(),
+    })),
+    &ctx
+);
+
+// User seeks
+let effects = player.update(
+    &Msg::Action(Action::Player(ActionPlayer::Seek {
+        time: 300000,  // 5 minutes
+        duration: 3600000,
+        device: "web".to_string(),
+    })),
+    &ctx
+);
+
+// Pause/resume
+let effects = player.update(
+    &Msg::Action(Action::Player(ActionPlayer::PausedChanged {
+        paused: true,
+    })),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Video Parameters
+// Set video params for subtitles and skip gaps
+let effects = player.update(
+    &Msg::Action(Action::Player(ActionPlayer::VideoParamsChanged {
+        video_params: Some(VideoParams {
+            hash: Some("0123456789abcdef".to_string()),
+            size: Some(1_500_000_000),
+            filename: Some("Video.mkv".to_string()),
+        }),
+    })),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Next Video
+// Play next episode
+let effects = player.update(
+    &Msg::Action(Action::Player(ActionPlayer::NextVideo)),
+    &ctx
+);
+
+// Check if next video is available
+if player.next_video.is_some() {
+    println!("Next video: {:?}", player.next_video);
+    if let Some(stream) = &player.next_stream {
+        println!("Recommended stream: {:?}", stream);
+    }
+}
+```
+</CodeGroup>
+
+## Performance Considerations
+
+<Warning>
+  - `TimeChanged` should be called frequently (every 1-5 seconds) but library sync is rate-limited
+  - Seek operations collect logs which may impact memory for long sessions
+  - Loading subtitles from many addons can be slow; consider limiting addons
+</Warning>
+
+<Info>
+  The player automatically handles:
+  - Library state persistence
+  - Progress tracking
+  - Watched status updates
+  - Binge watching recommendations
+  - Analytics event emission
+</Info>
+
+## See Also
+
+- [Stream](/api/types/stream) - Stream structure
+- [LibraryItem](/api/types/library-item) - Library item updates
+- [MetaDetails](/api/models/meta-details) - Content details before playback
+- [Subtitles](/api/types/subtitles) - Subtitle structure

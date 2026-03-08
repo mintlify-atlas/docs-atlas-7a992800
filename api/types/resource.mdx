@@ -1,0 +1,436 @@
+---
+title: "Resource Types"
+description: "Meta items, videos, streams, and subtitles resource types"
+---
+
+## Overview
+
+Resource types represent content metadata, videos, streams, and subtitles returned by Stremio addons.
+
+## MetaItem
+
+Detailed metadata item with full video information.
+
+<ResponseField name="preview" type="MetaItemPreview" required>
+  Preview information (flattened into parent)
+</ResponseField>
+
+<ResponseField name="videos" type="Vec<Video>" default="[]">
+  List of videos associated with this meta item (sorted and deduplicated)
+</ResponseField>
+
+### Methods
+
+#### `videos_iter(&self) -> impl DoubleEndedIterator<Item = &Video>`
+Iterate over videos, filtering out specials (season 0) for series.
+
+#### `videos_by_season(&self, season: u32) -> Vec<&Video>`
+Get all videos for a specific season.
+
+## MetaItemPreview
+
+Preview metadata without full video list (used in catalogs).
+
+<ResponseField name="id" type="String" required>
+  Unique identifier
+</ResponseField>
+
+<ResponseField name="type" type="String" required>
+  Content type (e.g., "movie", "series", "channel")
+</ResponseField>
+
+<ResponseField name="name" type="String" required>
+  Display name
+</ResponseField>
+
+<ResponseField name="poster" type="Option<Url>">
+  Poster image URL
+</ResponseField>
+
+<ResponseField name="background" type="Option<Url>">
+  Background image URL
+</ResponseField>
+
+<ResponseField name="logo" type="Option<Url>">
+  Logo image URL
+</ResponseField>
+
+<ResponseField name="description" type="Option<String>">
+  Description text
+</ResponseField>
+
+<ResponseField name="releaseInfo" type="Option<String>">
+  Release information (e.g., year)
+</ResponseField>
+
+<ResponseField name="runtime" type="Option<String>">
+  Runtime information
+</ResponseField>
+
+<ResponseField name="released" type="Option<DateTime<Utc>>">
+  Release date
+</ResponseField>
+
+<ResponseField name="posterShape" type="PosterShape" default="Poster">
+  Shape of the poster (Square, Landscape, or Poster)
+</ResponseField>
+
+<ResponseField name="links" type="Vec<Link>" default="[]">
+  Related links (IMDb, genres, etc.)
+</ResponseField>
+
+<ResponseField name="trailerStreams" type="Vec<Stream>" default="[]">
+  Trailer streams
+</ResponseField>
+
+<ResponseField name="behaviorHints" type="MetaItemBehaviorHints" default="{}">
+  Behavior hints
+</ResponseField>
+
+## Video
+
+Represents a single video (episode, movie, etc.).
+
+<ResponseField name="id" type="String" required>
+  Unique identifier
+</ResponseField>
+
+<ResponseField name="title" type="String" default="">
+  Video title (also accepts "name" alias)
+</ResponseField>
+
+<ResponseField name="released" type="Option<DateTime<Utc>>">
+  Release date
+</ResponseField>
+
+<ResponseField name="overview" type="Option<String>">
+  Video description
+</ResponseField>
+
+<ResponseField name="thumbnail" type="Option<String>">
+  Thumbnail image URL
+</ResponseField>
+
+<ResponseField name="streams" type="Vec<Stream>" default="[]">
+  Available streams (also accepts "stream" alias for single stream)
+</ResponseField>
+
+<ResponseField name="seriesInfo" type="Option<SeriesInfo>">
+  Series information if this is an episode (flattened)
+</ResponseField>
+
+<ResponseField name="trailerStreams" type="Vec<Stream>" default="[]">
+  Trailer streams
+</ResponseField>
+
+### Methods
+
+#### `stream(&self) -> Option<Cow<'_, Stream>>`
+Get the single stream if exactly one exists, or construct YouTube stream from video ID.
+
+## SeriesInfo
+
+Series episode information.
+
+<ResponseField name="season" type="u32" required>
+  Season number (0 for specials)
+</ResponseField>
+
+<ResponseField name="episode" type="u32" required>
+  Episode number
+</ResponseField>
+
+## Stream
+
+Stream source and metadata.
+
+<ResponseField name="source" type="StreamSource" required>
+  Stream source (flattened)
+</ResponseField>
+
+<ResponseField name="name" type="Option<String>">
+  Stream name/quality indicator
+</ResponseField>
+
+<ResponseField name="description" type="Option<String>">
+  Stream description (also accepts "title" alias)
+</ResponseField>
+
+<ResponseField name="thumbnail" type="Option<String>">
+  Stream thumbnail
+</ResponseField>
+
+<ResponseField name="subtitles" type="Vec<Subtitles>" default="[]">
+  Embedded subtitles
+</ResponseField>
+
+<ResponseField name="behaviorHints" type="StreamBehaviorHints" default="{}">
+  Behavior hints
+</ResponseField>
+
+### Methods
+
+#### `encode(&self) -> Result<String, anyhow::Error>`
+Encode stream to base64 string.
+
+#### `decode(stream: &str) -> Result<Self, anyhow::Error>`
+Decode stream from base64 string.
+
+#### `youtube(video_id: &str) -> Option<Self>`
+Construct YouTube stream from video ID.
+
+#### `is_source_match(&self, other_stream: &Stream) -> bool`
+Check if two streams have the same source.
+
+#### `is_binge_match(&self, other_stream: &Stream) -> bool`
+Check if two streams have the same binge group.
+
+#### `convert(&self, streaming_server_url: Option<&Url>) -> Result<Stream<ConvertedStreamSource>, EnvError>`
+Convert stream source to use streaming server for archives, torrents, etc.
+
+## StreamSource
+
+Enum defining various stream sources.
+
+### Url
+
+<ResponseField name="url" type="Url" required>
+  Direct URL to video file
+</ResponseField>
+
+### YouTube
+
+<ResponseField name="ytId" type="String" required>
+  YouTube video ID
+</ResponseField>
+
+### Rar
+
+<ResponseField name="rarUrls" type="Vec<ArchiveUrl>" required>
+  RAR archive URLs
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within archive
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### Zip
+
+<ResponseField name="zipUrls" type="Vec<ArchiveUrl>" required>
+  ZIP archive URLs
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within archive
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### Zip7
+
+<ResponseField name="7zipUrls" type="Vec<ArchiveUrl>" required>
+  7-Zip archive URLs
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within archive
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### Tgz
+
+<ResponseField name="tgzUrls" type="Vec<ArchiveUrl>" required>
+  TGZ archive URLs
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within archive
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### Tar
+
+<ResponseField name="tarUrls" type="Vec<ArchiveUrl>" required>
+  TAR archive URLs
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within archive
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### Nzb
+
+<ResponseField name="nzbUrl" type="Url" required>
+  NZB file URL
+</ResponseField>
+
+<ResponseField name="servers" type="Vec<Url>" default="[]">
+  Usenet server URLs
+</ResponseField>
+
+### Torrent
+
+<ResponseField name="infoHash" type="[u8; 20]" required>
+  BitTorrent info hash (hex encoded)
+</ResponseField>
+
+<ResponseField name="fileIdx" type="Option<u16>">
+  File index within torrent
+</ResponseField>
+
+<ResponseField name="announce" type="Vec<String>" default="[]">
+  Tracker announce URLs (also accepts "sources" alias)
+</ResponseField>
+
+<ResponseField name="fileMustInclude" type="Vec<String>" default="[]">
+  Filename patterns that must match
+</ResponseField>
+
+### PlayerFrame
+
+<ResponseField name="playerFrameUrl" type="Url" required>
+  URL to embed in player frame
+</ResponseField>
+
+### External
+
+<ResponseField name="externalUrl" type="Option<Url>">
+  External URL for general platforms
+</ResponseField>
+
+<ResponseField name="androidTvUrl" type="Option<Url>">
+  Android TV specific URL
+</ResponseField>
+
+<ResponseField name="tizenUrl" type="Option<String>">
+  Samsung Tizen URL
+</ResponseField>
+
+<ResponseField name="webosUrl" type="Option<String>">
+  LG webOS URL
+</ResponseField>
+
+## ArchiveUrl
+
+URL for archive file with optional size.
+
+<ResponseField name="url" type="Url" required>
+  Archive URL
+</ResponseField>
+
+<ResponseField name="bytes" type="Option<u64>">
+  File size in bytes
+</ResponseField>
+
+Serializes as `[url]` or `[url, bytes]`.
+
+## StreamBehaviorHints
+
+Hints for stream handling.
+
+<ResponseField name="notWebReady" type="bool" default="false">
+  Stream is not ready for web playback
+</ResponseField>
+
+<ResponseField name="bingeGroup" type="Option<String>">
+  Group ID for binge watching
+</ResponseField>
+
+<ResponseField name="countryWhitelist" type="Option<Vec<String>>">
+  Allowed country codes
+</ResponseField>
+
+<ResponseField name="proxyHeaders" type="Option<StreamProxyHeaders>">
+  Headers for proxied requests
+</ResponseField>
+
+<ResponseField name="filename" type="Option<String>">
+  Suggested filename
+</ResponseField>
+
+<ResponseField name="videoHash" type="Option<String>">
+  Video content hash
+</ResponseField>
+
+<ResponseField name="videoSize" type="Option<u64>">
+  Video file size in bytes
+</ResponseField>
+
+<ResponseField name="other" type="HashMap<String, serde_json::Value>" default="{}">
+  Additional custom hints
+</ResponseField>
+
+## Subtitles
+
+Subtitle track information.
+
+<ResponseField name="id" type="String" required>
+  Subtitle track identifier
+</ResponseField>
+
+<ResponseField name="lang" type="String" required>
+  Language code
+</ResponseField>
+
+<ResponseField name="url" type="Url" required>
+  Subtitle file URL
+</ResponseField>
+
+## Link
+
+External link for metadata.
+
+<ResponseField name="name" type="String" required>
+  Link display name
+</ResponseField>
+
+<ResponseField name="category" type="String" required>
+  Link category (e.g., "imdb", "Genres")
+</ResponseField>
+
+<ResponseField name="url" type="Url" required>
+  Link URL
+</ResponseField>
+
+## MetaItemBehaviorHints
+
+Behavior hints for meta items.
+
+<ResponseField name="defaultVideoId" type="Option<String>">
+  Default video to play
+</ResponseField>
+
+<ResponseField name="featuredVideoId" type="Option<String>">
+  Featured video ID
+</ResponseField>
+
+<ResponseField name="hasScheduledVideos" type="bool" default="false">
+  Whether videos are scheduled
+</ResponseField>
+
+<ResponseField name="other" type="HashMap<String, serde_json::Value>" default="{}">
+  Additional custom hints
+</ResponseField>
+
+## PosterShape
+
+Enum for poster aspect ratios:
+- `Square`: 1:1 square ratio
+- `Landscape`: Wide horizontal format  
+- `Poster`: Standard vertical poster (default)

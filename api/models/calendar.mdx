@@ -1,0 +1,405 @@
+---
+title: 'Calendar'
+description: 'Model for displaying upcoming episode releases in a calendar view'
+---
+
+## Overview
+
+The `Calendar` model displays upcoming episode releases for content in the user's library. It loads meta items from addons, organizes them by release date, and provides a month-based calendar interface for browsing upcoming content.
+
+## Structure
+
+### Fields
+
+<ResponseField name="selected" type="Option<Selected>">
+  Currently selected year and month
+</ResponseField>
+
+<ResponseField name="selectable" type="Selectable" required>
+  Navigation options for previous and next month
+</ResponseField>
+
+<ResponseField name="meta_items" type="Vec<ResourceLoadable<Vec<MetaItem>>>" required>
+  Meta items loaded from addons for library content
+</ResponseField>
+
+<ResponseField name="month_info" type="MonthInfo" required>
+  Information about the selected month (days, first weekday, today)
+</ResponseField>
+
+<ResponseField name="items" type="Vec<Item>" required>
+  Calendar items organized by day, containing videos releasing that day
+</ResponseField>
+
+## Selected
+
+<CodeGroup>
+```rust Selected (YearMonthDate)
+pub struct YearMonthDate {
+    pub month: u32,
+    pub year: i32,
+}
+```
+</CodeGroup>
+
+<ResponseField name="month" type="u32" required>
+  Month number (1-12)
+</ResponseField>
+
+<ResponseField name="year" type="i32" required>
+  Year
+</ResponseField>
+
+### Conversion
+
+The type can be created from:
+- `NaiveDate`
+- `DateTime<Utc>`
+- `Option<DateTime<Utc>>` (defaults to default values if None)
+
+**Source**: `src/models/calendar.rs:37`
+
+## Selectable
+
+<CodeGroup>
+```rust Selectable
+pub struct Selectable {
+    pub prev: YearMonthDate,
+    pub next: YearMonthDate,
+}
+```
+</CodeGroup>
+
+<ResponseField name="prev" type="YearMonthDate" required>
+  Previous month selection
+</ResponseField>
+
+<ResponseField name="next" type="YearMonthDate" required>
+  Next month selection
+</ResponseField>
+
+## MonthInfo
+
+<CodeGroup>
+```rust MonthInfo
+pub struct MonthInfo {
+    pub today: Option<u32>,
+    pub days: u32,
+    pub first_weekday: u32,
+}
+```
+</CodeGroup>
+
+<ResponseField name="today" type="Option<u32>">
+  Current day of month if the selected month is the current month
+</ResponseField>
+
+<ResponseField name="days" type="u32" required>
+  Number of days in the selected month (28-31)
+</ResponseField>
+
+<ResponseField name="first_weekday" type="u32" required>
+  Weekday of the first day (0=Monday, 6=Sunday)
+</ResponseField>
+
+This information is used for rendering a calendar grid.
+
+**Source**: `src/models/calendar.rs:98`
+
+## Item
+
+<CodeGroup>
+```rust Item
+pub struct Item {
+    pub date: FullDate,
+    pub items: Vec<ContentItem>,
+}
+```
+</CodeGroup>
+
+<ResponseField name="date" type="FullDate" required>
+  The date for this calendar day
+</ResponseField>
+
+<ResponseField name="items" type="Vec<ContentItem>" required>
+  Videos releasing on this date
+</ResponseField>
+
+## FullDate
+
+<CodeGroup>
+```rust FullDate  
+pub struct FullDate {
+    pub day: u32,
+    pub month: u32,
+    pub year: i32,
+}
+```
+</CodeGroup>
+
+A complete date representation for a specific day.
+
+## ContentItem
+
+<CodeGroup>
+```rust ContentItem
+pub struct ContentItem {
+    pub meta_item: MetaItem,
+    pub video: Video,
+}
+```
+</CodeGroup>
+
+<ResponseField name="meta_item" type="MetaItem" required>
+  The meta item (series) this video belongs to
+</ResponseField>
+
+<ResponseField name="video" type="Video" required>
+  The video (episode) releasing on this date
+</ResponseField>
+
+## Update Implementation
+
+Implements `UpdateWithCtx<E>` for calendar operations:
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Load::Calendar">
+    Loads calendar for a specific month (or current month if None):
+    - Loads meta items for library content (once)
+    - Sets selected month
+    - Computes month info
+    - Organizes videos by release date
+    - Updates navigation options
+    
+    **Source**: `src/models/calendar.rs:119`
+  </Accordion>
+
+  <Accordion title="Action::Unload">
+    Clears all calendar state:
+    - Clears meta items
+    - Resets selection
+    - Clears month info
+    - Clears items
+    
+    **Source**: `src/models/calendar.rs:139`
+  </Accordion>
+
+  <Accordion title="Internal::ResourceRequestResult">
+    Processes meta item responses:
+    - Updates meta_items with loaded data
+    - Reorganizes items by date
+    
+    **Source**: `src/models/calendar.rs:152`
+  </Accordion>
+</AccordionGroup>
+
+## Loading Meta Items
+
+Meta items are loaded once using the `CALENDAR_IDS_EXTRA_PROP`:
+
+<Steps>
+  <Step title="Gather Library IDs">
+    Collect IDs and types from library items (excluding removed and temp items)
+  </Step>
+  
+  <Step title="Sort by Recency">
+    Sort by modification time (most recent first)
+  </Step>
+  
+  <Step title="Create Catalog Request">
+    Use `AggrRequest::CatalogsFiltered` with `ExtraType::Ids`
+  </Step>
+  
+  <Step title="Limit Results">
+    Limit to `CALENDAR_ITEMS_COUNT` items
+  </Step>
+  
+  <Step title="Load from Addons">
+    Send request to all addons that support catalog with ids extra
+  </Step>
+</Steps>
+
+**Source**: `src/models/calendar.rs:288`
+
+## Items Organization
+
+Videos are organized by release date:
+
+<Steps>
+  <Step title="Iterate Days">
+    For each day in the month (1 to days)
+  </Step>
+  
+  <Step title="Filter Videos">
+    Find videos where `video.released` matches the day, month, and year
+  </Step>
+  
+  <Step title="Create ContentItems">
+    Combine meta item and video into ContentItem
+  </Step>
+  
+  <Step title="Create Day Item">
+    Create an Item for the day with all matching videos
+  </Step>
+</Steps>
+
+**Source**: `src/models/calendar.rs:239`
+
+## Month Selection
+
+When loading:
+
+1. If a specific month is provided, use it
+2. Otherwise, default to current month and year
+3. Compute month info (days, first weekday, today marker)
+4. Calculate prev/next month for navigation
+
+**Source**: `src/models/calendar.rs:172`
+
+## Usage Example
+
+<CodeGroup>
+```rust Example: Load Current Month
+use stremio_core::models::calendar::Calendar;
+use stremio_core::runtime::UpdateWithCtx;
+
+let mut calendar = Calendar::default();
+
+// Load current month (None means current month)
+let effects = calendar.update(
+    &Msg::Action(Action::Load(ActionLoad::Calendar(None))),
+    &ctx
+);
+
+// Access calendar data
+for item in &calendar.items {
+    if !item.items.is_empty() {
+        println!("Date: {}/{}/{}", item.date.year, item.date.month, item.date.day);
+        for content in &item.items {
+            println!("  - {} ({})", content.video.title, content.meta_item.preview.name);
+        }
+    }
+}
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Navigate Months
+use stremio_core::models::calendar::{Calendar, YearMonthDate};
+
+let mut calendar = Calendar::default();
+
+// Load January 2024
+let selected = YearMonthDate {
+    month: 1,
+    year: 2024,
+};
+
+let effects = calendar.update(
+    &Msg::Action(Action::Load(ActionLoad::Calendar(Some(selected)))),
+    &ctx
+);
+
+// Navigate to next month
+let next = calendar.selectable.next.clone();
+let effects = calendar.update(
+    &Msg::Action(Action::Load(ActionLoad::Calendar(Some(next)))),
+    &ctx
+);
+
+// Navigate to previous month  
+let prev = calendar.selectable.prev.clone();
+let effects = calendar.update(
+    &Msg::Action(Action::Load(ActionLoad::Calendar(Some(prev)))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Rendering Calendar Grid
+// Use month_info to render calendar
+let month_info = &calendar.month_info;
+
+println!("First weekday: {} (0=Monday)", month_info.first_weekday);
+println!("Days in month: {}", month_info.days);
+
+if let Some(today) = month_info.today {
+    println!("Today is day {}", today);
+}
+
+// Create grid with empty cells for alignment
+let empty_cells = month_info.first_weekday;
+let total_days = month_info.days;
+
+// Render calendar grid...
+```
+</CodeGroup>
+
+## Caching Strategy
+
+<Info>
+  Meta items are loaded once when the calendar is first loaded and cached for the entire session. Changing months does not reload meta items, only reorganizes them by date.
+</Info>
+
+To refresh meta items, unload and reload the calendar:
+
+<CodeGroup>
+```rust Refresh
+// Unload
+let effects = calendar.update(
+    &Msg::Action(Action::Unload),
+    &ctx
+);
+
+// Reload
+let effects = calendar.update(
+    &Msg::Action(Action::Load(ActionLoad::Calendar(None))),
+    &ctx
+);
+```
+</CodeGroup>
+
+## Limitations
+
+<Warning>
+  - Only shows content from the user's library
+  - Limited to `CALENDAR_ITEMS_COUNT` items (performance)
+  - Relies on addons providing accurate `video.released` dates
+  - Does not automatically update when library changes
+</Warning>
+
+## Constants
+
+- `CALENDAR_IDS_EXTRA_PROP` - Extra property name for requesting by IDs
+- `CALENDAR_ITEMS_COUNT` - Maximum number of meta items to load
+
+Defined in `src/constants.rs`
+
+## Month Navigation
+
+Previous/next month calculation uses `chrono::Months`:
+
+<CodeGroup>
+```rust Navigation
+let date = NaiveDate::from_ymd_opt(*year, *month, 1).unwrap_or_default();
+
+let prev_date = date - Months::new(1);
+let next_date = date + Months::new(1);
+
+Selectable {
+    prev: YearMonthDate::from(prev_date),
+    next: YearMonthDate::from(next_date),
+}
+```
+</CodeGroup>
+
+**Source**: `src/models/calendar.rs:220`
+
+## See Also
+
+- [MetaItem](/api/types/meta-item) - Meta item structure
+- [Video](/api/types/video) - Video structure with release dates
+- [LibraryBucket](/api/types/library) - Library data source

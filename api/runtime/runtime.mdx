@@ -1,0 +1,165 @@
+---
+title: Runtime
+description: Core runtime struct that manages the Model lifecycle and message dispatching
+---
+
+The `Runtime` struct is the central component of Stremio Core's runtime system. It manages the lifecycle of a Model, handles message dispatching, and coordinates effects execution.
+
+## Overview
+
+The Runtime provides a message-driven architecture where:
+- User actions are dispatched as messages
+- The model processes messages and produces effects
+- Effects are executed asynchronously
+- State changes are emitted as events
+
+## Struct Definition
+
+```rust
+pub struct Runtime<E: Env, M: Model<E>> {
+    model: Arc<RwLock<M>>,
+    tx: Sender<RuntimeEvent<E, M>>,
+    env: PhantomData<E>,
+}
+```
+
+### Generic Parameters
+
+- `E: Env` - The environment trait implementation that provides platform-specific functionality
+- `M: Model<E>` - The model that implements the application state and update logic
+
+## Methods
+
+### new
+
+Creates a new Runtime instance with an initial model and effects.
+
+```rust
+pub fn new(
+    model: M,
+    effects: Vec<Effect>,
+    buffer: usize,
+) -> (Self, Receiver<RuntimeEvent<E, M>>)
+```
+
+**Parameters:**
+- `model` - The initial model state
+- `effects` - Initial effects to execute
+- `buffer` - Size of the event channel buffer
+
+**Returns:** A tuple containing the Runtime instance and a receiver for runtime events
+
+**Example:**
+```rust
+let (runtime, rx) = Runtime::new(my_model, vec![], 100);
+```
+
+### model
+
+Provides read-only access to the current model state.
+
+```rust
+pub fn model(&self) -> LockResult<RwLockReadGuard<'_, M>>
+```
+
+**Returns:** A read guard for the model, or a lock error
+
+**Example:**
+```rust
+let model = runtime.model()?;
+let state = model.some_field;
+```
+
+### dispatch
+
+Dispatches an action to the runtime, which updates the model and processes effects.
+
+```rust
+pub fn dispatch(&self, action: RuntimeAction<E, M>)
+```
+
+**Parameters:**
+- `action` - The runtime action to dispatch
+
+**Example:**
+```rust
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::Authenticate(auth_request)),
+});
+```
+
+## Runtime Events
+
+The Runtime emits events through the receiver returned by `new()`.
+
+### RuntimeEvent
+
+```rust
+pub enum RuntimeEvent<E: Env, M: Model<E>> {
+    NewState(Vec<M::Field>, #[cfg(test)] M),
+    CoreEvent(Event),
+}
+```
+
+**Variants:**
+- `NewState` - Emitted when the model state changes, containing the list of changed fields
+- `CoreEvent` - Emitted for core events like authentication, library updates, etc.
+
+## RuntimeAction
+
+Actions dispatched to the runtime can optionally target a specific field.
+
+```rust
+pub struct RuntimeAction<E: Env, M: Model<E>> {
+    pub field: Option<M::Field>,
+    pub action: Action,
+}
+```
+
+**Fields:**
+- `field` - Optional field to update specifically
+- `action` - The action to perform
+
+## Usage Example
+
+```rust
+use stremio_core::runtime::{Runtime, RuntimeAction};
+use stremio_core::models::ctx::Ctx;
+use stremio_core::types::api::AuthRequest;
+
+// Create runtime with initial state
+let ctx = Ctx::new(profile, library, streaming_server);
+let (runtime, mut rx) = Runtime::new(ctx, vec![], 100);
+
+// Dispatch an action
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Ctx(ActionCtx::Authenticate(auth_request)),
+});
+
+// Listen for events
+while let Some(event) = rx.next().await {
+    match event {
+        RuntimeEvent::NewState(fields, ..) => {
+            println!("State changed: {:?}", fields);
+        }
+        RuntimeEvent::CoreEvent(event) => {
+            println!("Core event: {:?}", event);
+        }
+    }
+}
+```
+
+## Thread Safety
+
+The Runtime is designed to be thread-safe:
+- Model is protected by an `Arc<RwLock<M>>`
+- Runtime can be cloned and used across threads
+- Events are sent through a thread-safe channel
+
+## See Also
+
+- [Env](/api/runtime/env) - Environment trait for platform-specific operations
+- [Effects](/api/runtime/effects) - Effect system for asynchronous operations
+- [Messages](/api/runtime/messages) - Action, Event, and Internal message types

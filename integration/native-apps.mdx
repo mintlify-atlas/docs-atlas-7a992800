@@ -1,0 +1,659 @@
+---
+title: Native Applications
+description: Complete guide to integrating stremio-core into native applications
+---
+
+This guide shows you how to integrate stremio-core into native applications built with Rust, including desktop apps, mobile apps, and backend services.
+
+## Overview
+
+Stremio Core is designed to be platform-agnostic, allowing you to build native applications for:
+
+- Desktop (Windows, macOS, Linux)
+- Mobile (iOS, Android)
+- Server-side applications
+- CLI tools
+
+## Prerequisites
+
+<Info>
+**Minimum Rust Version**: 1.77 (as specified in Cargo.toml)  
+**Repository**: [github.com/Stremio/stremio-core](https://github.com/Stremio/stremio-core)
+</Info>
+
+## Adding Dependencies
+
+Add stremio-core to your `Cargo.toml`:
+
+<CodeGroup>
+```toml Basic
+[dependencies]
+stremio-core = { version = "0.1", features = ["derive", "analytics"] }
+futures = "0.3"
+http = "1.2"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+```
+
+```toml With Local Path
+[dependencies]
+stremio-core = { path = "../stremio-core", features = ["derive", "analytics"] }
+futures = "0.3"
+http = "1.2"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+```
+
+```toml With async runtime
+[dependencies]
+stremio-core = { version = "0.1", features = ["derive", "analytics", "env-future-send"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+http = "1.2"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+```
+</CodeGroup>
+
+## Features
+
+Stremio Core supports several features:
+
+| Feature | Description |
+|---------|-------------|
+| `derive` | Exports the Model derive macro |
+| `analytics` | Enables analytics collection |
+| `env-future-send` | Adds `Send` bound to futures (required for native, incompatible with WASM) |
+| `deflate` | Enables deflate compression in official add-ons |
+
+<Warning>
+Do **not** enable `env-future-send` for WASM targets. It will cause compilation errors.
+</Warning>
+
+## Implementing the Env Trait
+
+You must implement the `Env` trait for your platform:
+
+<CodeGroup>
+```rust Complete Native Implementation
+use stremio_core::runtime::{
+    Env, EnvError, EnvFuture, EnvFutureExt, TryEnvFuture,
+};
+use stremio_core::models::ctx::Ctx;
+use stremio_core::models::streaming_server::StreamingServer;
+use chrono::{DateTime, Utc};
+use http::Request;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Mutex;
+
+pub struct NativeEnv;
+
+// In-memory storage (replace with persistent storage)
+static STORAGE: Mutex<Option<HashMap<String, String>>> =
+    Mutex::new(None);
+
+impl NativeEnv {
+    pub fn init() {
+        let mut storage = STORAGE.lock().unwrap();
+        *storage = Some(HashMap::new());
+    }
+}
+
+impl Env for NativeEnv {
+    fn fetch<IN, OUT>(request: Request<IN>) -> TryEnvFuture<OUT>
+    where
+        IN: Serialize + Send + 'static,
+        OUT: for<'de> Deserialize<'de> + Send + 'static,
+    {
+        async move {
+            let (parts, body) = request.into_parts();
+            let client = reqwest::Client::new();
+            
+            let mut req = client
+                .request(
+                    parts.method.clone(),
+                    parts.uri.to_string(),
+                );
+            
+            // Add headers
+            for (key, value) in parts.headers.iter() {
+                req = req.header(
+                    key.as_str(),
+                    value.to_str().unwrap_or(""),
+                );
+            }
+            
+            // Add body for non-GET requests
+            if parts.method != http::Method::GET {
+                req = req.json(&body);
+            }
+            
+            let response = req
+                .send()
+                .await
+                .map_err(|e| EnvError::Fetch(e.to_string()))?;
+            
+            if !response.status().is_success() {
+                return Err(EnvError::Fetch(
+                    format!("HTTP {}", response.status())
+                ));
+            }
+            
+            response
+                .json::<OUT>()
+                .await
+                .map_err(|e| EnvError::Serde(e.to_string()))
+        }
+        .boxed_env()
+    }
+
+    fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>
+    where
+        for<'de> T: Deserialize<'de> + Send + 'static,
+    {
+        let key = key.to_owned();
+        async move {
+            let storage = STORAGE.lock().unwrap();
+            let result = storage
+                .as_ref()
+                .ok_or(EnvError::StorageUnavailable)?
+                .get(&key)
+                .map(|value| serde_json::from_str(value))
+                .transpose()
+                .map_err(|e| EnvError::StorageReadError(e.to_string()));
+            result
+        }
+        .boxed_env()
+    }
+
+    fn set_storage<T: Serialize>(key: &str, value: Option<&T>) -> TryEnvFuture<()> {
+        let key = key.to_owned();
+        let serialized = value
+            .map(|v| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| EnvError::StorageWriteError(e.to_string()));
+        
+        async move {
+            let serialized = serialized?;
+            let mut storage = STORAGE.lock().unwrap();
+            let storage_map = storage
+                .as_mut()
+                .ok_or(EnvError::StorageUnavailable)?;
+            
+            match serialized {
+                Some(value) => {
+                    storage_map.insert(key, value);
+                }
+                None => {
+                    storage_map.remove(&key);
+                }
+            }
+            Ok(())
+        }
+        .boxed_env()
+    }
+
+    fn exec_concurrent<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(future);
+    }
+
+    fn exec_sequential<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(future);
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn flush_analytics() -> EnvFuture<'static, ()> {
+        async {
+            // Implement analytics flushing
+            println!("Flushing analytics...");
+        }
+        .boxed_env()
+    }
+
+    fn analytics_context(
+        ctx: &Ctx,
+        streaming_server: &StreamingServer,
+        path: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "app_type": "native",
+            "app_language": ctx.profile.settings.interface_language,
+            "path": path,
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn log(message: String) {
+        println!("[Stremio Core] {}", message);
+    }
+}
+```
+</CodeGroup>
+
+## Persistent Storage
+
+For production applications, replace the in-memory storage with persistent storage:
+
+<CodeGroup>
+```rust SQLite Storage
+use rusqlite::{Connection, params};
+use std::sync::Mutex;
+
+static DB: Mutex<Option<Connection>> = Mutex::new(None);
+
+impl NativeEnv {
+    pub fn init_storage(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open(db_path)?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
+        *DB.lock().unwrap() = Some(conn);
+        Ok(())
+    }
+}
+
+fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>
+where
+    for<'de> T: Deserialize<'de> + Send + 'static,
+{
+    let key = key.to_owned();
+    async move {
+        let db = DB.lock().unwrap();
+        let conn = db.as_ref().ok_or(EnvError::StorageUnavailable)?;
+        
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT value FROM storage WHERE key = ?",
+                params![&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| EnvError::StorageReadError(e.to_string()))?;
+        
+        result
+            .map(|v| serde_json::from_str(&v))
+            .transpose()
+            .map_err(|e| EnvError::StorageReadError(e.to_string()))
+    }
+    .boxed_env()
+}
+```
+
+```rust File System Storage
+use std::fs;
+use std::path::PathBuf;
+
+static STORAGE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+impl NativeEnv {
+    pub fn init_storage(dir: PathBuf) -> std::io::Result<()> {
+        fs::create_dir_all(&dir)?;
+        *STORAGE_DIR.lock().unwrap() = Some(dir);
+        Ok(())
+    }
+}
+
+fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>
+where
+    for<'de> T: Deserialize<'de> + Send + 'static,
+{
+    let key = key.to_owned();
+    async move {
+        let storage_dir = STORAGE_DIR.lock().unwrap();
+        let dir = storage_dir.as_ref().ok_or(EnvError::StorageUnavailable)?;
+        
+        let file_path = dir.join(format!("{}.json", key));
+        
+        if !file_path.exists() {
+            return Ok(None);
+        }
+        
+        let content = fs::read_to_string(&file_path)
+            .map_err(|e| EnvError::StorageReadError(e.to_string()))?;
+        
+        serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| EnvError::StorageReadError(e.to_string()))
+    }
+    .boxed_env()
+}
+```
+</CodeGroup>
+
+## Creating and Using Models
+
+Once you have the Env trait implemented, you can use Stremio's models:
+
+<CodeGroup>
+```rust Basic Usage
+use stremio_core::models::ctx::Ctx;
+use stremio_core::types::profile::Profile;
+use stremio_core::types::library::LibraryBucket;
+use stremio_core::runtime::msg::{Action, ActionCtx, Event};
+use stremio_core::runtime::{Runtime, RuntimeAction, RuntimeEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize environment
+    NativeEnv::init();
+    
+    // Migrate storage schema
+    NativeEnv::migrate_storage_schema().await?;
+    
+    // Load or create profile
+    let profile = NativeEnv::get_storage::<Profile>("profile")
+        .await?
+        .unwrap_or_default();
+    
+    let library = NativeEnv::get_storage::<LibraryBucket>("library")
+        .await?
+        .unwrap_or_default();
+    
+    // Create context
+    let ctx = Ctx::new(
+        profile,
+        library,
+        Default::default(), // streams
+        Default::default(), // server_urls
+        Default::default(), // notifications
+        Default::default(), // search_history
+        Default::default(), // dismissed_events
+    );
+    
+    println!("Stremio Core initialized!");
+    println!("User: {:?}", ctx.profile.auth);
+    println!("Library items: {}", ctx.library.items.len());
+    
+    Ok(())
+}
+```
+
+```rust With Runtime
+use stremio_core::runtime::Runtime;
+use stremio_core::models::ctx::Ctx;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    NativeEnv::init();
+    NativeEnv::migrate_storage_schema().await?;
+    
+    // Create runtime
+    let (runtime, rx) = Runtime::<NativeEnv, _>::new(
+        Ctx::default(),
+        vec![], // Effects
+        1000,   // Effects buffer size
+    );
+    
+    // Dispatch actions
+    runtime.dispatch(RuntimeAction::NewModel(Action::Ctx(
+        ActionCtx::Authenticate(auth_request)
+    )));
+    
+    // Listen for events
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                RuntimeEvent::NewState(state) => {
+                    println!("State updated: {:?}", state);
+                }
+                RuntimeEvent::CoreEvent(event) => {
+                    println!("Core event: {:?}", event);
+                }
+            }
+        }
+    });
+    
+    Ok(())
+}
+```
+</CodeGroup>
+
+## Building Full Applications
+
+For a complete native application, you'll want to:
+
+### 1. Set Up Project Structure
+
+```
+my-stremio-app/
+├── Cargo.toml
+├── src/
+│   ├── main.rs
+│   ├── env.rs          # Env trait implementation
+│   ├── storage.rs      # Persistent storage
+│   ├── models.rs       # App models
+│   └── ui/             # UI layer (egui, iced, etc.)
+```
+
+### 2. Initialize on Startup
+
+<CodeGroup>
+```rust Initialization
+use stremio_core::runtime::Env;
+
+pub async fn initialize() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Initialize storage
+    NativeEnv::init_storage("./stremio-data")?;
+    
+    // 2. Migrate schema
+    NativeEnv::migrate_storage_schema().await?;
+    
+    // 3. Load data
+    let profile = NativeEnv::get_storage("profile").await?;
+    let library = NativeEnv::get_storage("library").await?;
+    // ... load other buckets
+    
+    Ok(())
+}
+```
+</CodeGroup>
+
+### 3. Handle Actions and Events
+
+<CodeGroup>
+```rust Event Handling
+use stremio_core::runtime::msg::{Action, Event};
+
+pub async fn handle_action(action: Action) {
+    match action {
+        Action::Ctx(ActionCtx::Authenticate(auth)) => {
+            println!("Authenticating user...");
+            // Handle authentication
+        }
+        Action::Ctx(ActionCtx::AddToLibrary(meta)) => {
+            println!("Adding to library: {}", meta.name);
+            // Update UI
+        }
+        _ => {}
+    }
+}
+
+pub fn handle_event(event: Event) {
+    match event {
+        Event::UserAuthenticated { .. } => {
+            println!("User logged in!");
+            // Update UI state
+        }
+        Event::AddonInstalled { transport_url, id } => {
+            println!("Addon installed: {}", id);
+        }
+        _ => {}
+    }
+}
+```
+</CodeGroup>
+
+### 4. Persist State
+
+<CodeGroup>
+```rust Auto-save
+use tokio::time::{interval, Duration};
+
+pub async fn auto_save_loop(ctx: Arc<Mutex<Ctx>>) {
+    let mut interval = interval(Duration::from_secs(30));
+    
+    loop {
+        interval.tick().await;
+        
+        let ctx = ctx.lock().unwrap().clone();
+        
+        // Save profile
+        if let Err(e) = NativeEnv::set_storage(
+            "profile",
+            Some(&ctx.profile)
+        ).await {
+            eprintln!("Failed to save profile: {}", e);
+        }
+        
+        // Save library
+        if let Err(e) = NativeEnv::set_storage(
+            "library",
+            Some(&ctx.library)
+        ).await {
+            eprintln!("Failed to save library: {}", e);
+        }
+    }
+}
+```
+</CodeGroup>
+
+## Desktop UI Integration
+
+Integrate with desktop UI frameworks:
+
+<CodeGroup>
+```rust egui Example
+use eframe::egui;
+use stremio_core::models::ctx::Ctx;
+
+struct StremioApp {
+    ctx: Ctx,
+    runtime: Runtime<NativeEnv, Ctx>,
+}
+
+impl eframe::App for StremioApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Stremio");
+            
+            if self.ctx.profile.auth.is_some() {
+                ui.label(format!(
+                    "Logged in as: {:?}",
+                    self.ctx.profile.auth.as_ref().unwrap().user.email
+                ));
+            } else {
+                if ui.button("Login").clicked() {
+                    // Dispatch login action
+                }
+            }
+            
+            ui.separator();
+            
+            ui.label(format!(
+                "Library: {} items",
+                self.ctx.library.items.len()
+            ));
+        });
+    }
+}
+```
+</CodeGroup>
+
+## Mobile Integration
+
+### iOS
+
+Use `cargo-mobile2` or create a static library:
+
+```toml
+[lib]
+crate-type = ["staticlib", "cdylib"]
+```
+
+### Android
+
+Use `cargo-ndk` and JNI bindings:
+
+```bash
+cargo install cargo-ndk
+cargo ndk -t arm64-v8a build --release
+```
+
+## Performance Considerations
+
+<CardGroup cols={2}>
+  <Card title="Use Release Builds" icon="gauge-high">
+    Always use `--release` for production. The debug build can be 10-100x slower.
+  </Card>
+  
+  <Card title="Enable LTO" icon="compress">
+    Link-time optimization is enabled by default in stremio-core's release profile.
+  </Card>
+  
+  <Card title="Lazy Loading" icon="clock">
+    Load data lazily to improve startup time. Don't load everything at once.
+  </Card>
+  
+  <Card title="Background Tasks" icon="layer-group">
+    Use `exec_concurrent` for background operations like analytics and caching.
+  </Card>
+</CardGroup>
+
+## Testing
+
+<CodeGroup>
+```rust Unit Tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stremio_core::runtime::Env;
+
+    #[tokio::test]
+    async fn test_storage() {
+        NativeEnv::init();
+        
+        // Set value
+        NativeEnv::set_storage("test_key", Some(&"test_value"))
+            .await
+            .unwrap();
+        
+        // Get value
+        let value: Option<String> = NativeEnv::get_storage("test_key")
+            .await
+            .unwrap();
+        
+        assert_eq!(value, Some("test_value".to_string()));
+    }
+}
+```
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Trait" icon="gear" href="/integration/environment-trait">
+    Learn about all Env trait methods
+  </Card>
+  <Card title="Models" icon="cube" href="/models/overview">
+    Explore available Stremio models
+  </Card>
+</CardGroup>

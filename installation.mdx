@@ -1,0 +1,292 @@
+---
+title: "Installation"
+description: "Add Stremio Core to your Rust project and configure optional features"
+---
+
+## Requirements
+
+<Note>
+  **Minimum Supported Rust Version (MSRV)**: 1.77
+  
+  When upgrading the MSRV, make sure to update the CI workflows accordingly.
+</Note>
+
+Ensure you have Rust 1.77 or later installed:
+
+```bash
+rustc --version
+```
+
+If you need to update Rust:
+
+```bash
+rustup update
+```
+
+## Add to Your Project
+
+Add `stremio-core` to your `Cargo.toml`:
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = "0.1.0"
+```
+
+### Using a Specific Git Commit
+
+To use the latest development version:
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { git = "https://github.com/Stremio/stremio-core", branch = "main" }
+```
+
+## Feature Flags
+
+Stremio Core provides several optional feature flags to customize functionality:
+
+### `env-future-send`
+
+Adds the `Send` marker trait to the `Env` trait methods and `EnvFuture`.
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["env-future-send"] }
+```
+
+<Warning>
+  **Do NOT enable this feature for WebAssembly targets!**
+  
+  The `Send` trait is not supported in WASM environments. Enabling this feature for WASM will cause a compile error. See [wasm-bindgen issue #2833](https://github.com/rustwasm/wasm-bindgen/issues/2833) for details.
+</Warning>
+
+**When to use:**
+
+<CodeGroup>
+
+```toml Native (Desktop/Mobile)
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["env-future-send"] }
+```
+
+```toml WebAssembly
+[dependencies]
+stremio-core = { version = "0.1.0" }
+# Do NOT include "env-future-send" for WASM
+```
+
+</CodeGroup>
+
+### `derive`
+
+Exports the `Model` derive macro from `stremio-derive`.
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["derive"] }
+```
+
+With this feature enabled, you can derive the `Model` trait:
+
+```rust
+use stremio_core::Model;
+
+#[derive(Model, Clone)]
+struct MyModel {
+    // your fields
+}
+```
+
+<Note>
+  Without the `derive` feature, you'll need to manually implement the `Model` trait or depend on `stremio-derive` separately.
+</Note>
+
+### `analytics`
+
+Enables core analytics functionality.
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["analytics"] }
+```
+
+When enabled, this feature:
+
+- Adds the `analytics` module to the public API
+- Enables analytics tracking in the runtime
+- Provides `Env::analytics_context()` and `Env::flush_analytics()` methods
+
+### `deflate`
+
+Enables deflate compression in official add-ons.
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { version = "0.1.0", features = ["deflate"] }
+```
+
+This feature is useful when you need compressed responses from official Stremio add-ons to reduce bandwidth.
+
+## Multiple Features
+
+You can combine multiple features:
+
+```toml Cargo.toml
+[dependencies]
+stremio-core = { 
+    version = "0.1.0", 
+    features = ["env-future-send", "derive", "analytics", "deflate"] 
+}
+```
+
+## Platform-Specific Configuration
+
+Depending on your target platform, you may need different configurations:
+
+<Tabs>
+  <Tab title="Desktop Application">
+    ```toml Cargo.toml
+    [dependencies]
+    stremio-core = { version = "0.1.0", features = ["env-future-send", "derive", "analytics"] }
+    
+    # Common desktop dependencies
+    tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+    serde = { version = "1", features = ["derive"] }
+    serde_json = "1"
+    ```
+  </Tab>
+  
+  <Tab title="WebAssembly">
+    ```toml Cargo.toml
+    [dependencies]
+    stremio-core = { version = "0.1.0", features = ["derive"] }
+    # NO "env-future-send" for WASM!
+    
+    # Common WASM dependencies
+    wasm-bindgen = "0.2"
+    wasm-bindgen-futures = "0.4"
+    serde = { version = "1", features = ["derive"] }
+    serde_json = "1"
+    ```
+  </Tab>
+  
+  <Tab title="Mobile (iOS/Android)">
+    ```toml Cargo.toml
+    [dependencies]
+    stremio-core = { version = "0.1.0", features = ["env-future-send", "derive"] }
+    
+    # Common mobile dependencies
+    tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+    serde = { version = "1", features = ["derive"] }
+    serde_json = "1"
+    ```
+  </Tab>
+</Tabs>
+
+## Verify Installation
+
+Create a simple test to verify the installation:
+
+```rust src/main.rs
+use stremio_core::types::profile::Profile;
+
+fn main() {
+    let profile = Profile::default();
+    println!("Profile created: {:#?}", profile);
+}
+```
+
+Run the example:
+
+```bash
+cargo run
+```
+
+You should see output showing the default profile structure.
+
+## Development Tools
+
+For development, you may also want these tools:
+
+```bash
+# Install rustfmt for code formatting
+rustup component add rustfmt
+
+# Install clippy for linting
+rustup component add clippy
+```
+
+The Stremio Core repository includes configuration files:
+
+- `rustfmt.toml` - Code formatting rules
+- `clippy.toml` - Linting rules
+
+Run formatting and linting:
+
+```bash
+cargo fmt
+cargo clippy
+```
+
+## Release Configuration
+
+The default release profile in Stremio Core is optimized for size:
+
+```toml Cargo.toml
+[profile.release]
+lto = true
+opt-level = 's'
+```
+
+- **`lto = true`**: Enables Link Time Optimization for better dead code elimination
+- **`opt-level = 's'`**: Optimizes for size rather than speed
+
+You can override this in your own `Cargo.toml` if needed:
+
+```toml Cargo.toml
+[profile.release]
+lto = true
+opt-level = 3  # Optimize for speed instead
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Compile error about Send trait in WASM">
+    **Error:** `Send` is not implemented for a type when building for WASM.
+    
+    **Solution:** Remove the `env-future-send` feature from your dependencies:
+    
+    ```toml
+    [dependencies]
+    stremio-core = { version = "0.1.0" }  # No features
+    ```
+  </Accordion>
+  
+  <Accordion title="MSRV compatibility issues">
+    **Error:** Compilation fails with older Rust versions.
+    
+    **Solution:** Update Rust to version 1.77 or later:
+    
+    ```bash
+    rustup update
+    ```
+  </Accordion>
+  
+  <Accordion title="Missing Model macro">
+    **Error:** `cannot find derive macro Model in this scope`
+    
+    **Solution:** Enable the `derive` feature:
+    
+    ```toml
+    [dependencies]
+    stremio-core = { version = "0.1.0", features = ["derive"] }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+  Learn how to build your first application with Stremio Core
+</Card>

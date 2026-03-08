@@ -1,0 +1,293 @@
+---
+title: "Addon Types"
+description: "Addon manifest, descriptor, and resource types for Stremio Core"
+---
+
+## Overview
+
+Addon types define the structure of Stremio addons including their manifests, descriptors, resources, and request/response handling.
+
+## Manifest
+
+The main addon manifest containing metadata and capabilities.
+
+<ParamField path="id" type="String" required>
+  Unique identifier for the addon
+</ParamField>
+
+<ParamField path="version" type="Version" required>
+  Semantic version of the addon (uses `semver::Version`)
+</ParamField>
+
+<ParamField path="name" type="String" required>
+  Display name of the addon
+</ParamField>
+
+<ParamField path="contactEmail" type="Option<String>">
+  Contact email for the addon developer
+</ParamField>
+
+<ParamField path="description" type="Option<String>">
+  Description of the addon
+</ParamField>
+
+<ParamField path="logo" type="Option<Url>">
+  URL to the addon logo image
+</ParamField>
+
+<ParamField path="background" type="Option<Url>">
+  URL to the addon background image
+</ParamField>
+
+<ParamField path="types" type="Vec<String>" required>
+  Globally supported content types (e.g., `movie`, `series`, `anime`, `tv`)
+</ParamField>
+
+<ParamField path="resources" type="Vec<ManifestResource>" required>
+  Resources supported by the addon (catalog, meta, stream, subtitles, etc.)
+</ParamField>
+
+<ParamField path="idPrefixes" type="Option<Vec<String>>">
+  Globally supported ID prefixes (e.g., `tt`, `anidb`, `kitsu`)
+</ParamField>
+
+<ParamField path="catalogs" type="Vec<ManifestCatalog>" default="[]">
+  Catalog definitions provided by the addon
+</ParamField>
+
+<ParamField path="addonCatalogs" type="Vec<ManifestCatalog>" default="[]">
+  Addon catalog definitions
+</ParamField>
+
+<ParamField path="behaviorHints" type="ManifestBehaviorHints" default="{}">
+  Behavior hints for the addon
+</ParamField>
+
+### ManifestResource
+
+Defines a resource that the addon supports. Can be in short or full format.
+
+**Short format**: Just a string with the resource name
+```rust
+ManifestResource::Short(String)
+```
+
+**Full format**: Detailed resource definition
+
+<ResponseField name="name" type="String" required>
+  Resource name (e.g., "catalog", "meta", "stream", "subtitles")
+</ResponseField>
+
+<ResponseField name="types" type="Option<Vec<String>>">
+  Content types supported by this resource (subset of manifest types)
+</ResponseField>
+
+<ResponseField name="idPrefixes" type="Option<Vec<String>>">
+  ID prefixes supported by this resource (subset of manifest idPrefixes)
+</ResponseField>
+
+### ManifestCatalog
+
+Defines a catalog provided by the addon.
+
+<ResponseField name="id" type="String" required>
+  Unique identifier for the catalog
+</ResponseField>
+
+<ResponseField name="type" type="String" required>
+  Content type (e.g., `movie`, `series`)
+</ResponseField>
+
+<ResponseField name="name" type="Option<String>">
+  Display name for the catalog
+</ResponseField>
+
+<ResponseField name="extra" type="ManifestExtra">
+  Extra properties supported by the catalog
+</ResponseField>
+
+### ManifestExtra
+
+Defines extra properties for catalogs. Can be in short or full format.
+
+**Full format**:
+<ResponseField name="extra" type="Vec<ExtraProp>">
+  Array of extra property definitions
+</ResponseField>
+
+**Short format**:
+<ResponseField name="extraRequired" type="Vec<String>" default="[]">
+  Names of required extra properties
+</ResponseField>
+
+<ResponseField name="extraSupported" type="Vec<String>" default="[]">
+  Names of supported extra properties
+</ResponseField>
+
+### ExtraProp
+
+Defines an extra property for catalogs.
+
+<ResponseField name="name" type="String" required>
+  Name of the extra property
+</ResponseField>
+
+<ResponseField name="isRequired" type="bool" default="false">
+  Whether this property is required
+</ResponseField>
+
+<ResponseField name="options" type="Vec<String>" default="[]">
+  Available options for this property
+</ResponseField>
+
+<ResponseField name="optionsLimit" type="OptionsLimit" default="1">
+  Maximum number of options that can be selected
+</ResponseField>
+
+### ManifestBehaviorHints
+
+Behavior hints for the addon.
+
+<ResponseField name="adult" type="bool" default="false">
+  Whether the addon contains adult content
+</ResponseField>
+
+<ResponseField name="p2p" type="bool" default="false">
+  Whether the addon uses P2P technology
+</ResponseField>
+
+<ResponseField name="configurable" type="bool" default="false">
+  Whether the addon is configurable
+</ResponseField>
+
+<ResponseField name="configurationRequired" type="bool" default="false">
+  Whether configuration is required before use
+</ResponseField>
+
+## Descriptor
+
+Addon descriptor containing the manifest and transport information.
+
+<ResponseField name="manifest" type="Manifest" required>
+  The addon manifest
+</ResponseField>
+
+<ResponseField name="transportUrl" type="Url" required>
+  Base URL for accessing the addon
+</ResponseField>
+
+<ResponseField name="flags" type="DescriptorFlags" default="{}">
+  Addon flags
+</ResponseField>
+
+### DescriptorFlags
+
+<ResponseField name="official" type="bool" default="false">
+  Whether this is an official Stremio addon
+</ResponseField>
+
+<ResponseField name="protected" type="bool" default="false">
+  Whether this addon is protected from removal
+</ResponseField>
+
+## ResourcePath
+
+Defines a resource request path.
+
+<ResponseField name="resource" type="String" required>
+  Resource type (e.g., "catalog", "meta", "stream", "subtitles")
+</ResponseField>
+
+<ResponseField name="type" type="String" required>
+  Content type (e.g., "series", "movie")
+</ResponseField>
+
+<ResponseField name="id" type="String" required>
+  Resource identifier
+</ResponseField>
+
+<ResponseField name="extra" type="Vec<ExtraValue>" default="[]">
+  Extra query parameters
+</ResponseField>
+
+### ExtraValue
+
+<ResponseField name="name" type="String" required>
+  Name of the extra parameter
+</ResponseField>
+
+<ResponseField name="value" type="String" required>
+  Value of the extra parameter
+</ResponseField>
+
+## ResourceRequest
+
+Complete resource request with base URL and path.
+
+<ResponseField name="base" type="Url" required>
+  Base URL of the addon
+</ResponseField>
+
+<ResponseField name="path" type="ResourcePath" required>
+  Resource path
+</ResponseField>
+
+## ResourceResponse
+
+Response from an addon resource request. This is an enum with the following variants:
+
+### Metas
+
+<ResponseField name="metas" type="Vec<MetaItemPreview>" required>
+  Array of meta item previews (catalog response)
+</ResponseField>
+
+### MetasDetailed
+
+<ResponseField name="metasDetailed" type="Vec<MetaItem>" required>
+  Array of detailed meta items with videos
+</ResponseField>
+
+### Meta
+
+<ResponseField name="meta" type="MetaItem" required>
+  Single detailed meta item
+</ResponseField>
+
+### Streams
+
+<ResponseField name="streams" type="Vec<Stream>" required>
+  Array of stream objects
+</ResponseField>
+
+### Subtitles
+
+<ResponseField name="subtitles" type="Vec<Subtitles>" required>
+  Array of subtitle objects
+</ResponseField>
+
+### Addons
+
+<ResponseField name="addons" type="Vec<Descriptor>" required>
+  Array of addon descriptors
+</ResponseField>
+
+## ResourceResponseCache
+
+Resource response with caching information.
+
+<ResponseField name="cacheMaxAge" type="Option<u64>">
+  Cache max age in seconds
+</ResponseField>
+
+<ResponseField name="staleRevalidate" type="Option<u64>">
+  Stale-while-revalidate time in seconds
+</ResponseField>
+
+<ResponseField name="staleError" type="Option<u64>">
+  Stale-if-error time in seconds
+</ResponseField>
+
+<ResponseField name="resource" type="ResourceResponse" required>
+  The actual resource response
+</ResponseField>

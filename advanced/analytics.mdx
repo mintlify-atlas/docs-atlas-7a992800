@@ -1,0 +1,514 @@
+---
+title: 'Analytics Integration'
+description: 'Built-in analytics system for tracking user behavior in Stremio Core'
+---
+
+## Overview
+
+Stremio Core includes an optional analytics module that provides a robust, queue-based system for tracking user events. The analytics system is designed to be resilient, handling network failures gracefully and ensuring events are delivered reliably.
+
+<Info>
+  Analytics must be enabled with the `analytics` feature flag in your `Cargo.toml`:
+  ```toml
+  stremio-core = { version = "*", features = ["analytics"] }
+  ```
+</Info>
+
+See src/lib.rs:17
+
+## Architecture
+
+The analytics system consists of:
+
+- **Event Queue**: Batches events by authentication key
+- **Automatic Retry**: Failed batches are re-queued for retry
+- **Batch Processing**: Events are sent in batches to reduce network overhead
+- **Context Enrichment**: Automatically adds app context to each event
+
+See src/analytics.rs:1
+
+## Core Components
+
+### The Analytics Struct
+
+```rust
+use stremio_core::analytics::Analytics;
+use stremio_core::runtime::Env;
+
+pub struct Analytics<E: Env> {
+    state: Arc<Mutex<State>>,
+    env: PhantomData<E>,
+}
+```
+
+See src/analytics.rs:82
+
+**Internal state:**
+
+```rust
+struct State {
+    number: u64,                      // Event counter
+    queue: VecDeque<EventsBatch>,     // Pending batches
+    pending: Option<EventsBatch>,     // Currently sending
+}
+```
+
+See src/analytics.rs:48
+
+### Event Structure
+
+```rust
+#[derive(Clone, PartialEq, Serialize, Debug)]
+struct Event {
+    #[serde(flatten)]
+    data: serde_json::Value,          // Custom event data
+    
+    #[serde(rename = "eventName")]
+    name: String,                      // Event name
+    
+    #[serde(rename = "eventTime")]
+    time: i64,                         // Timestamp
+    
+    #[serde(rename = "eventNumber")]
+    number: u64,                       // Sequence number
+    
+    #[serde(rename = "app")]
+    context: serde_json::Value,        // App context
+}
+```
+
+See src/analytics.rs:28
+
+## Basic Usage
+
+### Emitting Events
+
+```rust
+use stremio_core::analytics::Analytics;
+use stremio_core::models::ctx::Ctx;
+use stremio_core::models::streaming_server::StreamingServer;
+use serde_json::json;
+
+let analytics = Analytics::<MyEnv>::default();
+
+// Emit a custom event
+analytics.emit(
+    "video_played".to_string(),
+    json!({
+        "video_id": "tt1234567",
+        "addon_id": "com.example.addon",
+        "duration": 120,
+    }),
+    &ctx,
+    &streaming_server,
+    "/player",  // Current path
+);
+```
+
+See src/analytics.rs:88
+
+**Key parameters:**
+- `name`: Event identifier (e.g., "video_played", "addon_installed")
+- `data`: Custom JSON payload with event-specific data
+- `ctx`: User context (provides auth key)
+- `streaming_server`: Streaming server state
+- `path`: Current application path
+
+### Sending Batches
+
+Events are queued until explicitly sent:
+
+```rust
+use futures::FutureExt;
+
+// Send the next batch of events
+analytics.send_next_batch().await;
+```
+
+See src/analytics.rs:110
+
+**Automatic retry logic:**
+- Network errors cause the batch to be re-queued
+- API errors (except auth errors) trigger retry
+- Successfully sent batches are removed from the queue
+
+See src/analytics.rs:119
+
+### Flushing All Events
+
+Flush all pending events (useful for shutdown):
+
+```rust
+// Send all queued events immediately
+analytics.flush().await;
+```
+
+See src/analytics.rs:141
+
+<Warning>
+  `flush()` clears the pending batch and sends all queued batches concurrently. Failed sends are not retried.
+</Warning>
+
+## Environment Integration
+
+The analytics system requires environment integration:
+
+### Analytics Context
+
+Implement `analytics_context()` in your `Env`:
+
+```rust
+use stremio_core::runtime::Env;
+use stremio_core::models::ctx::Ctx;
+use stremio_core::models::streaming_server::StreamingServer;
+use serde_json::{json, Value};
+
+impl Env for MyEnv {
+    fn analytics_context(
+        ctx: &Ctx,
+        streaming_server: &StreamingServer,
+        path: &str,
+    ) -> Value {
+        json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "app_type": "desktop",
+            "app_language": ctx.profile.settings.interface_language,
+            "path": path,
+            "server_version": streaming_server.settings
+                .as_ref()
+                .map(|s| &s.app_version),
+            "server_url": streaming_server.base_url.as_ref(),
+            "installation_id": get_installation_id(),
+        })
+    }
+    
+    // ... other Env methods
+}
+```
+
+See src/runtime/env.rs:155 and src/analytics.rs:106
+
+### Flush on Shutdown
+
+Implement `flush_analytics()` to handle graceful shutdown:
+
+```rust
+impl Env for MyEnv {
+    fn flush_analytics() -> EnvFuture<'static, ()> {
+        async move {
+            if let Some(analytics) = ANALYTICS.lock().as_ref() {
+                analytics.flush().await;
+            }
+        }
+        .boxed_env()
+    }
+}
+```
+
+See src/runtime/env.rs:154
+
+## Event Batching
+
+Events are automatically batched by authentication key:
+
+```rust
+struct EventsBatch {
+    auth_key: AuthKey,
+    events: Vec<Event>,
+}
+```
+
+See src/analytics.rs:42
+
+**Batching behavior:**
+- Events from the same user are batched together
+- When auth key changes, a new batch is created
+- Batches are sent in FIFO order
+
+See src/analytics.rs:62
+
+## Common Event Types
+
+### Video Playback Events
+
+```rust
+// Video started
+analytics.emit(
+    "video_started".to_string(),
+    json!({
+        "video_id": video.id,
+        "video_type": video.video_type,  // "movie" or "series"
+        "addon_transport_url": addon.transport_url,
+    }),
+    &ctx,
+    &streaming_server,
+    "/player",
+);
+
+// Video ended
+analytics.emit(
+    "video_ended".to_string(),
+    json!({
+        "video_id": video.id,
+        "duration_watched": duration_ms,
+        "total_duration": video.duration_ms,
+    }),
+    &ctx,
+    &streaming_server,
+    "/player",
+);
+```
+
+### Addon Events
+
+```rust
+// Addon installed
+analytics.emit(
+    "addon_installed".to_string(),
+    json!({
+        "addon_id": addon.manifest.id,
+        "addon_name": addon.manifest.name,
+        "addon_version": addon.manifest.version,
+        "transport_url": addon.transport_url,
+    }),
+    &ctx,
+    &streaming_server,
+    "/addons",
+);
+
+// Addon uninstalled
+analytics.emit(
+    "addon_uninstalled".to_string(),
+    json!({
+        "addon_id": addon.manifest.id,
+    }),
+    &ctx,
+    &streaming_server,
+    "/addons",
+);
+```
+
+### Search Events
+
+```rust
+// Search performed
+analytics.emit(
+    "search_performed".to_string(),
+    json!({
+        "query": search_query,
+        "results_count": results.len(),
+        "content_type": content_type,  // "movie", "series", etc.
+    }),
+    &ctx,
+    &streaming_server,
+    "/search",
+);
+```
+
+## Integration with Runtime
+
+Schedule periodic batch sending:
+
+```rust
+use std::time::Duration;
+use tokio::time::interval;
+
+// Send analytics batches every 30 seconds
+tokio::spawn(async move {
+    let mut interval = interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        analytics.send_next_batch().await;
+    }
+});
+```
+
+### Graceful Shutdown
+
+```rust
+use tokio::signal;
+
+#[tokio::main]
+async fn main() {
+    let analytics = Analytics::<MyEnv>::default();
+    
+    // ... application code ...
+    
+    // Wait for shutdown signal
+    signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+    
+    // Flush analytics before exit
+    println!("Flushing analytics...");
+    analytics.flush().await;
+    println!("Shutdown complete");
+}
+```
+
+## Debug Mode
+
+In debug builds, events are logged instead of sent:
+
+```rust
+#[cfg(debug_assertions)]
+fn send_events_batch_to_api<E: Env>(
+    batch: &EventsBatch,
+) -> TryEnvFuture<APIResult<SuccessResponse>> {
+    E::log(format!("send_events_batch_to_api: {:#?}", &batch));
+    future::ok(APIResult::Ok(SuccessResponse { success: True })).boxed_env()
+}
+```
+
+See src/analytics.rs:157
+
+<Info>
+  Debug logging prevents accidental data collection during development and testing.
+</Info>
+
+## Privacy Considerations
+
+<AccordionGroup>
+  <Accordion title="Authentication Required">
+    Events are only sent for authenticated users. Anonymous usage is not tracked.
+  </Accordion>
+
+  <Accordion title="User Control">
+    Consider adding a user setting to enable/disable analytics:
+    ```rust
+    if ctx.profile.settings.send_analytics {
+        analytics.emit(/* ... */);
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Minimal Data">
+    Only collect data necessary for improving the application. Avoid PII.
+  </Accordion>
+
+  <Accordion title="Transparency">
+    Document what data is collected in your privacy policy.
+  </Accordion>
+</AccordionGroup>
+
+## API Endpoint
+
+Events are sent to the Stremio API:
+
+```rust
+fetch_api::<E, _, _, _>(&APIRequest::Events {
+    auth_key: batch.auth_key.to_owned(),
+    events: batch
+        .events
+        .iter()
+        .map(|value| serde_json::to_value(value).unwrap())
+        .collect(),
+})
+```
+
+See src/analytics.rs:163
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Batch Wisely">
+    Send batches at reasonable intervals (30-60 seconds) to balance network usage and data freshness.
+  </Accordion>
+
+  <Accordion title="Use Structured Data">
+    Use typed structs for event data instead of arbitrary JSON:
+    ```rust
+    #[derive(Serialize)]
+    struct VideoPlayedEvent {
+        video_id: String,
+        addon_id: String,
+        duration: u64,
+    }
+    
+    let event_data = VideoPlayedEvent { /* ... */ };
+    analytics.emit(
+        "video_played".to_string(),
+        serde_json::to_value(event_data).unwrap(),
+        &ctx,
+        &streaming_server,
+        path,
+    );
+    ```
+  </Accordion>
+
+  <Accordion title="Handle Auth Changes">
+    When the user logs out, analytics automatically starts a new batch. No special handling needed.
+  </Accordion>
+
+  <Accordion title="Monitor Queue Size">
+    In production, monitor the analytics queue to detect network issues:
+    ```rust
+    // Pseudocode - you'd need to expose state
+    if analytics.queue_size() > 100 {
+        log::warn!("Analytics queue growing: {} batches pending", analytics.queue_size());
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing
+
+Test analytics without sending real events:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stremio_core::unit_tests::TestEnv;
+
+    #[test]
+    fn test_analytics_emit() {
+        let analytics = Analytics::<TestEnv>::default();
+        let ctx = Ctx::default();
+        let streaming_server = StreamingServer::default();
+        
+        // Emit event
+        analytics.emit(
+            "test_event".to_string(),
+            json!({ "data": "value" }),
+            &ctx,
+            &streaming_server,
+            "/test",
+        );
+        
+        // In debug mode, this will only log
+        // Check logs for the event
+    }
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Events Not Sending">
+    - Verify the user is authenticated (`ctx.profile.auth_key()` returns `Some`)
+    - Check that `send_next_batch()` is being called periodically
+    - Ensure network connectivity
+    - Check API endpoint is reachable
+  </Accordion>
+
+  <Accordion title="Queue Growing Unbounded">
+    - Network issues preventing batch delivery
+    - API errors causing retries
+    - Call `flush()` periodically to clear old batches
+  </Accordion>
+
+  <Accordion title="Events Missing Context">
+    - Ensure `analytics_context()` is properly implemented in your `Env`
+    - Verify all required context data is available
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Trait" icon="globe" href="/core-concepts/environment">
+    Learn about implementing the Env trait
+  </Card>
+  <Card title="State Management" icon="diagram-project" href="/advanced/state-management">
+    Understand the runtime and effect system
+  </Card>
+</CardGroup>

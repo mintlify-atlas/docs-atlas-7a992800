@@ -1,0 +1,394 @@
+---
+title: Effects
+description: Effect system for asynchronous operations and side effects
+---
+
+The Effects system in Stremio Core provides a way to handle asynchronous operations and side effects in a functional, declarative manner. Effects are produced by model updates and executed by the Runtime.
+
+## Overview
+
+The effect system consists of:
+- `Effect` - A single side effect (immediate message or future)
+- `EffectFuture` - An asynchronous effect that will eventually produce a message
+- `Effects` - A collection of effects with change tracking
+
+## Effect
+
+Represents a single side effect to be executed.
+
+```rust
+pub enum Effect {
+    Msg(Box<Msg>),
+    Future(EffectFuture),
+}
+```
+
+### Variants
+
+#### Msg
+
+An immediate message that will be dispatched to the model.
+
+```rust
+Effect::Msg(Box::new(Msg::Internal(Internal::ProfileChanged)))
+```
+
+#### Future
+
+An asynchronous operation that will eventually produce a message.
+
+```rust
+Effect::Future(EffectFuture::Concurrent(async {
+    let user = fetch_user().await;
+    Msg::Internal(Internal::UserAPIResult { ... })
+}.boxed_env()))
+```
+
+## EffectFuture
+
+Defines how an asynchronous effect should be executed.
+
+```rust
+pub enum EffectFuture {
+    Concurrent(Future),
+    Sequential(Future),
+}
+```
+
+### Variants
+
+#### Concurrent
+
+Executes the future concurrently (in parallel) using `Env::exec_concurrent`.
+
+**Use for:**
+- Independent operations
+- API requests that can run in parallel
+- Non-blocking background tasks
+
+**Example:**
+```rust
+EffectFuture::Concurrent(async {
+    let streams = fetch_streams().await;
+    Msg::Internal(Internal::ResourceRequestResult(request, Box::new(Ok(streams))))
+}.boxed_env())
+```
+
+#### Sequential
+
+Executes the future sequentially (queued) using `Env::exec_sequential`.
+
+**Use for:**
+- Operations that must happen in order
+- Storage updates that shouldn't race
+- Operations that depend on previous results
+
+**Example:**
+```rust
+EffectFuture::Sequential(async {
+    save_to_storage().await;
+    Msg::Internal(Internal::LibraryChanged(true))
+}.boxed_env())
+```
+
+## Effects
+
+A collection of effects with metadata about whether they change the model state.
+
+```rust
+pub struct Effects {
+    effects: Vec<Effect>,
+    pub has_changed: bool,
+}
+```
+
+### Fields
+
+- `effects` - Vector of effects to execute
+- `has_changed` - Whether the effects represent a state change
+
+### Constructors
+
+#### none
+
+Creates an Effects with no effects but marked as changed.
+
+```rust
+fn none() -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::none();
+assert!(effects.is_empty());
+assert!(effects.has_changed);
+```
+
+#### one
+
+Creates an Effects with a single effect.
+
+```rust
+fn one(effect: Effect) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::one(Effect::Msg(Box::new(msg)));
+```
+
+#### many
+
+Creates an Effects with multiple effects.
+
+```rust
+fn many(effects: Vec<Effect>) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::many(vec![
+    Effect::Msg(Box::new(msg1)),
+    Effect::Msg(Box::new(msg2)),
+]);
+```
+
+#### msg
+
+Creates an Effects from a single message.
+
+```rust
+fn msg(msg: Msg) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::msg(Msg::Internal(Internal::ProfileChanged));
+```
+
+#### msgs
+
+Creates an Effects from multiple messages.
+
+```rust
+fn msgs(msgs: Vec<Msg>) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::msgs(vec![msg1, msg2, msg3]);
+```
+
+#### future
+
+Creates an Effects from a single future.
+
+```rust
+fn future(future: EffectFuture) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::future(EffectFuture::Concurrent(
+    fetch_data().boxed_env()
+));
+```
+
+#### futures
+
+Creates an Effects from multiple futures.
+
+```rust
+fn futures(futures: Vec<EffectFuture>) -> Self
+```
+
+**Example:**
+```rust
+let effects = Effects::futures(vec![future1, future2]);
+```
+
+### Methods
+
+#### unchanged
+
+Marks the effects as not changing the model state.
+
+```rust
+fn unchanged(mut self) -> Self
+```
+
+When `has_changed` is false, the Runtime won't emit a `NewState` event.
+
+**Example:**
+```rust
+let effects = Effects::msg(msg).unchanged();
+assert!(!effects.has_changed);
+```
+
+#### join
+
+Combines two Effects collections.
+
+```rust
+fn join(mut self, mut effects: Effects) -> Self
+```
+
+The resulting `has_changed` will be true if either collection has changed.
+
+**Example:**
+```rust
+let combined = effects1.join(effects2);
+```
+
+#### len
+
+Returns the number of effects.
+
+```rust
+fn len(&self) -> usize
+```
+
+#### is_empty
+
+Returns whether there are any effects.
+
+```rust
+fn is_empty(&self) -> bool
+```
+
+### Default
+
+The default Effects is an empty, unchanged collection.
+
+```rust
+let effects = Effects::default();
+assert!(effects.is_empty());
+assert!(!effects.has_changed);
+```
+
+## Usage Patterns
+
+### Model Update with Effects
+
+```rust
+impl<E: Env> Update<E> for MyModel {
+    fn update(&mut self, msg: &Msg) -> Effects {
+        match msg {
+            Msg::Action(Action::Ctx(ActionCtx::Authenticate(auth_request))) => {
+                // Update state
+                self.loading = true;
+                
+                // Return effect to fetch user
+                Effects::one(Effect::Future(EffectFuture::Concurrent(
+                    authenticate(auth_request.clone()).boxed_env()
+                )))
+            },
+            Msg::Internal(Internal::CtxAuthResult(_, result)) => {
+                // Handle result
+                self.loading = false;
+                match result {
+                    Ok(response) => {
+                        self.user = Some(response.auth);
+                        Effects::none()
+                    },
+                    Err(error) => {
+                        self.error = Some(error);
+                        Effects::none()
+                    }
+                }
+            },
+            _ => Effects::none().unchanged()
+        }
+    }
+}
+```
+
+### Multiple Effects
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Ctx(ActionCtx::InstallAddon(descriptor))) => {
+            self.addons.push(descriptor.clone());
+            
+            // Combine multiple effects
+            let save_effect = save_to_storage(&self.addons);
+            let push_effect = push_to_api(&self.addons);
+            let notify_effect = Effects::msg(
+                Msg::Event(Event::AddonInstalled { ... })
+            );
+            
+            save_effect.join(push_effect).join(notify_effect)
+        },
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+### Conditional Effects
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Ctx(ActionCtx::UpdateSettings(settings))) => {
+            let changed = self.settings != *settings;
+            self.settings = settings.clone();
+            
+            if changed {
+                Effects::one(save_settings_effect(&self.settings))
+            } else {
+                Effects::none().unchanged()
+            }
+        },
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+### Sequential vs Concurrent
+
+```rust
+// Concurrent: Independent API requests
+let fetch_catalogs = EffectFuture::Concurrent(
+    fetch_catalogs().boxed_env()
+);
+let fetch_streams = EffectFuture::Concurrent(
+    fetch_streams().boxed_env()
+);
+Effects::futures(vec![fetch_catalogs, fetch_streams])
+
+// Sequential: Storage operations that must complete in order
+let save = EffectFuture::Sequential(
+    save_profile().boxed_env()
+);
+let notify = EffectFuture::Sequential(
+    notify_saved().boxed_env()
+);
+Effects::futures(vec![save, notify])
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always handle effect results">
+    Every future effect should eventually produce a message that the model handles. This ensures proper error handling and state updates.
+  </Accordion>
+  
+  <Accordion title="Use unchanged() for side-effect-only operations">
+    If an update only produces effects without changing state, mark it as `unchanged()` to avoid unnecessary `NewState` events.
+  </Accordion>
+  
+  <Accordion title="Prefer concurrent for independent operations">
+    Use `EffectFuture::Concurrent` for operations that can run in parallel, like multiple API requests.
+  </Accordion>
+  
+  <Accordion title="Use sequential for dependent operations">
+    Use `EffectFuture::Sequential` for operations that must complete in order, like storage updates.
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+- [Runtime](/api/runtime/runtime) - Runtime that executes effects
+- [Env](/api/runtime/env) - Environment trait used by effects
+- [Messages](/api/runtime/messages) - Messages produced by effects

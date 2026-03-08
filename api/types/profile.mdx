@@ -1,0 +1,324 @@
+---
+title: "Profile Types"
+description: "User profile, authentication, and settings types"
+---
+
+## Overview
+
+Profile types manage user authentication, preferences, settings, and addon configuration.
+
+## Profile
+
+Main user profile structure.
+
+<ResponseField name="auth" type="Option<Auth>">
+  Authentication information (None if not logged in)
+</ResponseField>
+
+<ResponseField name="addons" type="Vec<Descriptor>" required>
+  List of installed addons
+</ResponseField>
+
+<ResponseField name="addonsLocked" type="bool" default="false">
+  Lock flag raised when addon fetch fails to prevent overwriting user addons with defaults
+</ResponseField>
+
+<ResponseField name="settings" type="Settings" required>
+  User settings and preferences
+</ResponseField>
+
+### Methods
+
+#### `uid(&self) -> UID`
+Get the user ID if authenticated, None otherwise.
+
+#### `auth_key(&self) -> Option<&AuthKey>`
+Get the authentication key if logged in.
+
+#### `has_trakt<E: Env>(&self) -> bool`
+Check if user has valid Trakt authentication (not expired).
+
+### Default Profile
+
+Default profile includes:
+- No authentication
+- Official Stremio addons
+- Unlocked addons
+- Default settings
+
+## Auth
+
+Authentication credentials.
+
+<ResponseField name="key" type="AuthKey" required>
+  Authentication key (String wrapper)
+</ResponseField>
+
+<ResponseField name="user" type="User" required>
+  User information
+</ResponseField>
+
+## User
+
+User account information.
+
+<ResponseField name="id" type="UserId" required>
+  User ID (serialized as `_id`)
+</ResponseField>
+
+<ResponseField name="email" type="String" required>
+  User email address
+</ResponseField>
+
+<ResponseField name="fbId" type="Option<String>">
+  Facebook ID if linked
+</ResponseField>
+
+<ResponseField name="appleId" type="Option<String>">
+  Apple ID if linked
+</ResponseField>
+
+<ResponseField name="avatar" type="Option<String>">
+  Avatar URL or identifier
+</ResponseField>
+
+<ResponseField name="lastModified" type="DateTime<Utc>" required>
+  Last modification timestamp
+</ResponseField>
+
+<ResponseField name="dateRegistered" type="DateTime<Utc>" required>
+  Registration date
+</ResponseField>
+
+<ResponseField name="trakt" type="Option<TraktInfo>">
+  Trakt integration information
+</ResponseField>
+
+<ResponseField name="premiumExpire" type="Option<DateTime<Utc>>">
+  Premium subscription expiry date
+</ResponseField>
+
+<ResponseField name="gdprConsent" type="GDPRConsent" required>
+  GDPR consent information
+</ResponseField>
+
+### Methods
+
+#### `is_new_user<E: Env + 'static>(&self) -> bool`
+Check if user registered within `NEW_USER_DAYS`.
+
+## TraktInfo
+
+Trakt.tv integration credentials.
+
+<ResponseField name="createdAt" type="DateTime<Utc>" required>
+  When the token was created
+</ResponseField>
+
+<ResponseField name="expiresIn" type="Duration" required>
+  Token expiration duration
+</ResponseField>
+
+<ResponseField name="accessToken" type="String" required>
+  Trakt access token (sensitive, not shown in Debug)
+</ResponseField>
+
+## GDPRConsent
+
+GDPR consent status.
+
+<ResponseField name="tos" type="bool" required>
+  Terms of service consent
+</ResponseField>
+
+<ResponseField name="privacy" type="bool" required>
+  Privacy policy consent
+</ResponseField>
+
+<ResponseField name="marketing" type="bool" required>
+  Marketing consent
+</ResponseField>
+
+<ResponseField name="from" type="Option<String>">
+  Source of consent
+</ResponseField>
+
+## Settings
+
+User preferences and application settings.
+
+### Interface Settings
+
+<ResponseField name="interfaceLanguage" type="String" default="eng">
+  Interface language code
+</ResponseField>
+
+<ResponseField name="hideSpoilers" type="bool" default="false">
+  Whether to hide spoilers
+</ResponseField>
+
+<ResponseField name="gamepadSupport" type="bool" default="false">
+  Enable gamepad support
+</ResponseField>
+
+### Playback Settings
+
+<ResponseField name="playerType" type="Option<String>">
+  Preferred player type
+</ResponseField>
+
+<ResponseField name="bingeWatching" type="bool" default="true">
+  Auto-play next episode
+</ResponseField>
+
+<ResponseField name="playInBackground" type="bool" default="true">
+  Continue playback in background
+</ResponseField>
+
+<ResponseField name="hardwareDecoding" type="bool" default="true">
+  Use hardware video decoding
+</ResponseField>
+
+<ResponseField name="videoMode" type="Option<String>">
+  Video mode setting
+</ResponseField>
+
+<ResponseField name="frameRateMatchingStrategy" type="FrameRateMatchingStrategy" default="FrameRateOnly">
+  How to match frame rates (Disabled, FrameRateOnly, FrameRateAndResolution)
+</ResponseField>
+
+<ResponseField name="nextVideoNotificationDuration" type="u32" default="35000">
+  Duration of next video notification in milliseconds
+</ResponseField>
+
+### Audio Settings
+
+<ResponseField name="audioPassthrough" type="bool" default="false">
+  Enable audio passthrough
+</ResponseField>
+
+<ResponseField name="audioLanguage" type="Option<String>" default="eng">
+  Preferred audio language
+</ResponseField>
+
+<ResponseField name="secondaryAudioLanguage" type="Option<String>">
+  Secondary audio language
+</ResponseField>
+
+<ResponseField name="surroundSound" type="bool" default="false">
+  Enable surround sound
+</ResponseField>
+
+### Subtitle Settings
+
+<ResponseField name="subtitlesLanguage" type="Option<String>" default="eng">
+  Preferred subtitle language
+</ResponseField>
+
+<ResponseField name="secondarySubtitlesLanguage" type="Option<String>">
+  Secondary subtitle language
+</ResponseField>
+
+<ResponseField name="subtitlesAutoSelect" type="bool" default="true">
+  Automatically select subtitles
+</ResponseField>
+
+<ResponseField name="subtitlesSize" type="u8" default="100">
+  Subtitle size percentage
+</ResponseField>
+
+<ResponseField name="subtitlesFont" type="String" default="Roboto">
+  Subtitle font family
+</ResponseField>
+
+<ResponseField name="subtitlesBold" type="bool" default="false">
+  Bold subtitles
+</ResponseField>
+
+<ResponseField name="subtitlesOffset" type="u8" default="5">
+  Vertical offset for subtitles
+</ResponseField>
+
+<ResponseField name="subtitlesTextColor" type="String" default="#FFFFFFFF">
+  Subtitle text color (ARGB hex)
+</ResponseField>
+
+<ResponseField name="subtitlesBackgroundColor" type="String" default="#00000000">
+  Subtitle background color (ARGB hex)
+</ResponseField>
+
+<ResponseField name="subtitlesOutlineColor" type="String" default="#000000">
+  Subtitle outline color (RGB hex)
+</ResponseField>
+
+<ResponseField name="subtitlesOpacity" type="u8" default="100">
+  Subtitle opacity percentage
+</ResponseField>
+
+<ResponseField name="assSubtitlesStyling" type="bool" default="false">
+  Enable ASS subtitle styling
+</ResponseField>
+
+### Control Settings
+
+<ResponseField name="escExitFullscreen" type="bool" default="true">
+  ESC key exits fullscreen
+</ResponseField>
+
+<ResponseField name="seekTimeDuration" type="u32" default="10000">
+  Seek duration in milliseconds for arrow keys
+</ResponseField>
+
+<ResponseField name="seekShortTimeDuration" type="u32" default="3000">
+  Short seek duration in milliseconds (arrow + shift)
+</ResponseField>
+
+<ResponseField name="pauseOnMinimize" type="bool" default="false">
+  Pause when application is minimized
+</ResponseField>
+
+<ResponseField name="quitOnClose" type="bool" default="true">
+  Quit application when window is closed
+</ResponseField>
+
+### Server Settings
+
+<ResponseField name="streamingServerUrl" type="Url" required>
+  Streaming server URL
+</ResponseField>
+
+<ResponseField name="streamingServerWarningDismissed" type="Option<DateTime<Utc>>">
+  When streaming server warning was dismissed
+</ResponseField>
+
+<ResponseField name="serverInForeground" type="bool" default="false">
+  Run server in foreground
+</ResponseField>
+
+### Privacy Settings
+
+<ResponseField name="sendCrashReports" type="bool" default="true">
+  Send crash reports
+</ResponseField>
+
+## Type Aliases
+
+### UID
+
+```rust
+pub type UID = Option<UserId>;
+```
+
+User ID - Some when authenticated, None when not authenticated.
+
+### UserId
+
+Wrapper around String for type safety.
+
+### AuthKey
+
+Wrapper around String for authentication key.
+
+### Password
+
+Wrapper around String for passwords (not shown in Debug output).

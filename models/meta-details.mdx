@@ -1,0 +1,511 @@
+---
+title: 'Meta Details'
+description: 'Detailed metadata, streams, and library integration for content items'
+icon: 'film'
+---
+
+## Overview
+
+The `MetaDetails` model aggregates metadata from multiple addons, manages stream selection, tracks library state, and provides watch progress and rating functionality.
+
+## Structure
+
+```rust
+pub struct MetaDetails {
+    pub selected: Option<Selected>,
+    pub meta_items: Vec<ResourceLoadable<MetaItem>>,
+    pub meta_streams: Vec<ResourceLoadable<Vec<Stream>>>,
+    pub streams: Vec<ResourceLoadable<Vec<Stream>>>,
+    pub last_used_stream: Option<ResourceLoadable<Option<Stream>>>,
+    pub library_item: Option<LibraryItem>,
+    pub rating_info: Option<Loadable<RatingInfo, EnvError>>,
+    pub watched: Option<WatchedBitField>,
+}
+```
+
+## Selected
+
+Defines what to load:
+
+```rust
+pub struct Selected {
+    pub meta_path: ResourcePath,
+    pub stream_path: Option<ResourcePath>,
+    pub guess_stream: bool,
+}
+```
+
+**Fields:**
+- `meta_path` - Resource path for metadata (e.g., `catalog/movie/tt1254207`)
+- `stream_path` - Optional path for streams (e.g., `stream/movie/tt1254207`)
+- `guess_stream` - Auto-select stream based on metadata
+
+### Stream Guessing
+
+When `guess_stream: true` and `stream_path: None`:
+
+<Steps>
+  <Step title="Wait for Meta">
+    Waits for first successful MetaItem load
+  </Step>
+  
+  <Step title="Find Video ID">
+    Uses `behavior_hints.default_video_id` if available, otherwise uses `meta.id` if no videos
+  </Step>
+  
+  <Step title="Override Selection">
+    Updates `stream_path` and sets `guess_stream: false`
+  </Step>
+</Steps>
+
+```rust:src/models/meta_details.rs
+fn selected_guess_stream_update(
+    selected: &mut Option<Selected>,
+    meta_items: &[ResourceLoadable<MetaItem>],
+) -> Effects {
+    // Wait for all requests to complete
+    let meta_item = if meta_items.iter().all(|item| {
+        matches!(item.content, Some(Loadable::Ready(..)))
+            || matches!(item.content, Some(Loadable::Err(..)))
+    }) {
+        meta_items.iter().find_map(|item| match &item.content {
+            Some(Loadable::Ready(meta)) => Some(meta),
+            _ => None,
+        })
+    } else {
+        return Effects::default();
+    };
+    
+    let video_id = match (
+        meta_item.videos.len(),
+        &meta_item.preview.behavior_hints.default_video_id,
+    ) {
+        (_, Some(default_video_id)) => default_video_id.to_owned(),
+        (0, None) => meta_item.preview.id.to_owned(),
+        _ => return Effects::default(),
+    };
+    
+    eq_update(selected, Some(Selected {
+        stream_path: Some(ResourcePath {
+            resource: "stream".to_owned(),
+            r#type: meta_path.r#type.to_owned(),
+            id: video_id,
+            extra: vec![],
+        }),
+        guess_stream: false,
+        // ...
+    }))
+}
+```
+
+## Meta Items
+
+Requests metadata from all addons supporting the resource:
+
+```rust:src/models/meta_details.rs
+fn meta_items_update<E: Env + 'static>(
+    meta_items: &mut Vec<ResourceLoadable<MetaItem>>,
+    selected: &Option<Selected>,
+    profile: &Profile,
+) -> Effects {
+    match selected {
+        Some(Selected { meta_path, .. }) => resources_update::<E, _>(
+            meta_items,
+            ResourcesAction::ResourcesRequested {
+                request: &AggrRequest::AllOfResource(meta_path.to_owned()),
+                addons: &profile.addons,
+                force: false,  // Use cached if available
+            },
+        ),
+        _ => eq_update(meta_items, vec![]),
+    }
+}
+```
+
+## Streams
+
+### Meta Streams
+
+Streams embedded in the MetaItem itself:
+
+```rust:src/models/meta_details.rs
+fn meta_streams_update(
+    meta_streams: &mut Vec<ResourceLoadable<Vec<Stream>>>,
+    selected: &Option<Selected>,
+    meta_items: &[ResourceLoadable<MetaItem>],
+) -> Effects {
+    match selected {
+        Some(Selected { stream_path: Some(stream_path), .. }) => {
+            let streams = meta_items
+                .iter()
+                .find_map(|meta_item| match &meta_item.content {
+                    Some(Loadable::Ready(meta)) => Some((meta_item.request, meta)),
+                    _ => None,
+                })
+                .and_then(|(request, meta)| {
+                    meta.videos
+                        .iter()
+                        .find(|v| v.id == stream_path.id)
+                        .and_then(|video| {
+                            if !video.streams.is_empty() {
+                                Some(Cow::Borrowed(&video.streams))
+                            } else {
+                                // Fallback to YouTube stream
+                                Stream::youtube(&video.id)
+                                    .map(|s| vec![s])
+                                    .map(Cow::Owned)
+                            }
+                        })
+                        .map(|streams| (request, streams))
+                })
+                .map(|(request, streams)| ResourceLoadable {
+                    request: ResourceRequest {
+                        base: request.base.to_owned(),
+                        path: ResourcePath {
+                            resource: "stream".to_owned(),
+                            r#type: request.path.r#type.to_owned(),
+                            id: stream_path.id.to_owned(),
+                            extra: request.path.extra.to_owned(),
+                        },
+                    },
+                    content: Some(Loadable::Ready(streams.into_owned())),
+                })
+                .into_iter()
+                .collect();
+            
+            eq_update(meta_streams, streams)
+        }
+        _ => Effects::none().unchanged(),
+    }
+}
+```
+
+### Addon Streams
+
+Streams from dedicated stream addons:
+
+```rust
+fn streams_update<E: Env + 'static>(
+    streams: &mut Vec<ResourceLoadable<Vec<Stream>>>,
+    selected: &Option<Selected>,
+    profile: &Profile,
+) -> Effects {
+    match selected {
+        Some(Selected { stream_path: Some(stream_path), .. }) => {
+            resources_update_with_vector_content::<E, _>(
+                streams,
+                ResourcesAction::ResourcesRequested {
+                    request: &AggrRequest::AllOfResource(stream_path.to_owned()),
+                    addons: &profile.addons,
+                    force: false,
+                },
+            )
+        }
+        _ => eq_update(streams, vec![]),
+    }
+}
+```
+
+### Last Used Stream
+
+Finds the most appropriate stream for binge watching:
+
+<Steps>
+  <Step title="Find Latest Stream Item">
+    Searches last 30 videos for a stored StreamItem
+  </Step>
+  
+  <Step title="Match Transport URL">
+    Finds addon responses from the same transport URL
+  </Step>
+  
+  <Step title="Find Stream">
+    Matches by source equality, then by binge group
+  </Step>
+</Steps>
+
+```rust:src/models/meta_details.rs
+fn last_used_stream_update(
+    last_used_stream: &mut Option<ResourceLoadable<Option<Stream>>>,
+    selected: &Option<Selected>,
+    meta_items: &[ResourceLoadable<MetaItem>],
+    meta_streams: &[ResourceLoadable<Vec<Stream>>],
+    streams: &[ResourceLoadable<Vec<Stream>>],
+    stream_bucket: &StreamsBucket,
+) -> Effects {
+    let all_streams = [meta_streams, streams].concat();
+    
+    let next_stream = match selected {
+        Some(Selected { stream_path: Some(stream_path), .. }) => {
+            meta_items
+                .iter()
+                .filter(|_| !all_streams.is_empty())
+                .find_map(|meta_item| match &meta_item.content {
+                    Some(Loadable::Ready(meta)) => {
+                        stream_bucket
+                            .last_stream_item(&stream_path.id, meta)
+                            .and_then(|stream_item| {
+                                all_streams
+                                    .iter()
+                                    .find(|res| {
+                                        res.request.base == stream_item.stream_transport_url
+                                    })
+                                    .and_then(|res| match &res.content {
+                                        Some(Loadable::Ready(streams)) => {
+                                            let stream = streams
+                                                .iter()
+                                                .find(|s| s.is_source_match(&stream_item.stream))
+                                                .or_else(|| {
+                                                    streams
+                                                        .iter()
+                                                        .find(|s| s.is_binge_match(&stream_item.stream))
+                                                })
+                                                .cloned();
+                                            
+                                            Some(ResourceLoadable {
+                                                request: res.request.clone(),
+                                                content: Some(Loadable::Ready(stream)),
+                                            })
+                                        }
+                                        _ => None,
+                                    })
+                            })
+                            .or_else(|| {
+                                Some(ResourceLoadable {
+                                    request: meta_item.request.clone(),
+                                    content: Some(Loadable::Ready(None)),
+                                })
+                            })
+                    }
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    
+    eq_update(last_used_stream, next_stream)
+}
+```
+
+## Library Integration
+
+### Library Item
+
+Creates or updates LibraryItem from metadata:
+
+```rust
+fn library_item_update<E: Env + 'static>(
+    library_item: &mut Option<LibraryItem>,
+    selected: &Option<Selected>,
+    meta_items: &[ResourceLoadable<MetaItem>],
+    library: &LibraryBucket,
+) -> Effects {
+    let meta_item = meta_items
+        .iter()
+        .find_map(|item| match &item.content {
+            Some(Loadable::Ready(meta)) => Some(meta),
+            _ => None,
+        });
+    
+    let next_item = match selected {
+        Some(selected) => {
+            library.items
+                .get(&selected.meta_path.id)
+                .map(|lib_item| {
+                    meta_item.map_or_else(
+                        || lib_item.to_owned(),
+                        |meta| LibraryItem::from((&meta.preview, lib_item)),
+                    )
+                })
+                .or_else(|| {
+                    meta_item.map(|meta| {
+                        LibraryItem::from((&meta.preview, PhantomData::<E>))
+                    })
+                })
+        }
+        _ => None,
+    };
+    
+    eq_update(library_item, next_item)
+}
+```
+
+### Watched BitField
+
+Tracks which episodes have been watched:
+
+```rust
+fn watched_update(
+    watched: &mut Option<WatchedBitField>,
+    meta_items: &[ResourceLoadable<MetaItem>],
+    library_item: &Option<LibraryItem>,
+) -> Effects {
+    let next_watched = meta_items
+        .iter()
+        .find_map(|item| match &item.content {
+            Some(Loadable::Ready(meta)) => Some(meta),
+            _ => None,
+        })
+        .and_then(|meta| {
+            library_item
+                .as_ref()
+                .map(|lib_item| (meta, lib_item))
+        })
+        .map(|(meta, lib_item)| {
+            lib_item.state.watched_bitfield(&meta.videos)
+        });
+    
+    eq_update(watched, next_watched)
+}
+```
+
+## Rating System
+
+### Supported Items
+
+```rust
+const USER_LIKES_SUPPORTED_ID_PREFIXES: [&str; 2] = ["tt", "kitsu:"];
+const USER_LIKES_SUPPORTED_TYPES: [&str; 2] = ["movie", "series"];
+
+fn supported_rating_id(id: &str) -> bool {
+    USER_LIKES_SUPPORTED_ID_PREFIXES
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+```
+
+### Get Rating
+
+```rust
+fn get_rating<E: Env + 'static>(auth_key: AuthKey, meta_path: &ResourcePath) -> Effect {
+    let request = RatingGetStatusRequest {
+        auth_key,
+        meta_item_id: meta_path.id.to_owned(),
+        meta_item_type: meta_path.r#type.to_owned(),
+    };
+    
+    EffectFuture::Concurrent(
+        E::fetch::<_, RatingGetStatusResponse>(request.into())
+            .map(move |result| {
+                Msg::Internal(Internal::RatingGetStatusResult(
+                    meta_path.id.clone(),
+                    result,
+                ))
+            })
+    )
+}
+```
+
+### Send Rating
+
+```rust
+pub struct RatingInfo {
+    pub meta_id: String,
+    pub status: Option<RatingStatus>,
+}
+
+pub enum Rating {
+    Like,
+    Dislike,
+}
+```
+
+**Action:**
+
+```rust
+Msg::Action(Action::MetaDetails(ActionMetaDetails::Rate(Some(Rating::Like))))
+```
+
+## Watch State Actions
+
+### Mark as Watched
+
+```rust
+Msg::Action(Action::MetaDetails(ActionMetaDetails::MarkAsWatched(true)))
+```
+
+Increments `times_watched` and updates `last_watched`.
+
+### Mark Video as Watched
+
+```rust
+Msg::Action(Action::MetaDetails(
+    ActionMetaDetails::MarkVideoAsWatched(video, true)
+))
+```
+
+Updates the WatchedBitField for specific episodes.
+
+### Mark Season as Watched
+
+```rust
+Msg::Action(Action::MetaDetails(
+    ActionMetaDetails::MarkSeasonAsWatched(season_number, true)
+))
+```
+
+Marks all episodes in a season as watched.
+
+## Usage Example
+
+```rust
+use stremio_core::models::meta_details::{MetaDetails, Selected};
+use stremio_core::types::addon::ResourcePath;
+
+// Load meta details for a movie
+let selected = Selected {
+    meta_path: ResourcePath {
+        resource: "meta".to_string(),
+        r#type: "movie".to_string(),
+        id: "tt1254207".to_string(),  // Big Fish
+        extra: vec![],
+    },
+    stream_path: Some(ResourcePath {
+        resource: "stream".to_string(),
+        r#type: "movie".to_string(),
+        id: "tt1254207".to_string(),
+        extra: vec![],
+    }),
+    guess_stream: false,
+};
+
+runtime.dispatch(Msg::Action(
+    Action::Load(ActionLoad::MetaDetails(selected))
+));
+
+// Wait for meta items to load
+// Then access:
+// - meta_details.meta_items - Metadata from all addons
+// - meta_details.streams - Available streams
+// - meta_details.library_item - Library state
+// - meta_details.last_used_stream - Suggested stream for binge watching
+
+// Rate the item
+if meta_details.rating_info.is_some() {
+    runtime.dispatch(Msg::Action(
+        Action::MetaDetails(ActionMetaDetails::Rate(Some(Rating::Like)))
+    ));
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Stream Selection">
+    Use `guess_stream: true` for series to automatically select the appropriate episode. For movies or when you know the specific video ID, set `stream_path` directly.
+  </Accordion>
+  
+  <Accordion title="Library Sync">
+    MetaDetails automatically syncs library item metadata on load, ensuring the LibraryItem is created or updated with latest info.
+  </Accordion>
+  
+  <Accordion title="Binge Watching">
+    The `last_used_stream` field provides continuity for binge watching by matching streams based on source and binge group hints.
+  </Accordion>
+</AccordionGroup>
+
+## Related Models
+
+- [Player](/models/player) - Playback with meta details
+- [Catalog](/models/catalog) - Browse to find items
+- [Library](/models/library) - Library management

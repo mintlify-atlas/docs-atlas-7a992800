@@ -1,0 +1,472 @@
+---
+title: Creating Addons
+description: Step-by-step guide to building your first Stremio addon
+---
+
+## Overview
+
+This guide walks you through creating a basic Stremio addon that provides movie catalogs and streams. We'll build a simple HTTP server that implements the addon protocol.
+
+<Note>
+While this guide uses Rust examples, you can create addons in any language that can serve HTTP. The [official addon SDK](https://github.com/Stremio/stremio-addon-sdk) provides JavaScript/Node.js implementation.
+</Note>
+
+## Prerequisites
+
+- Understanding of HTTP and JSON
+- Web server framework in your language of choice
+- Basic knowledge of the [manifest structure](/addons/manifest)
+- Familiarity with [resource types](/addons/resources)
+
+## Step 1: Create the Manifest
+
+The manifest defines your addon's capabilities. Create a JSON file or endpoint at `/manifest.json`:
+
+```json manifest.json
+{
+  "id": "com.example.movies",
+  "version": "1.0.0",
+  "name": "Example Movies",
+  "description": "Provides free movies and streams",
+  "logo": "https://example.com/logo.png",
+  "types": ["movie"],
+  "resources": ["catalog", "stream"],
+  "catalogs": [
+    {
+      "id": "top",
+      "type": "movie",
+      "name": "Top Movies",
+      "extra": [
+        {
+          "name": "skip"
+        }
+      ]
+    }
+  ],
+  "behaviorHints": {
+    "adult": false,
+    "p2p": false
+  }
+}
+```
+
+<Steps>
+  <Step title="Choose a unique ID">
+    Use reverse domain notation: `com.yourname.addonname`
+  </Step>
+  
+  <Step title="Define supported types">
+    List content types: `movie`, `series`, `tv`, `channel`, etc.
+  </Step>
+  
+  <Step title="Specify resources">
+    Include resources you'll implement: `catalog`, `meta`, `stream`, `subtitles`
+  </Step>
+  
+  <Step title="Configure catalogs">
+    Define browsable content collections with optional filters
+  </Step>
+</Steps>
+
+## Step 2: Implement the Catalog Resource
+
+Create an endpoint at `/catalog/{type}/{id}.json`:
+
+```javascript catalog-handler.js
+app.get('/catalog/:type/:id.json', (req, res) => {
+  const { type, id } = req.params;
+  
+  // Parse skip parameter from query
+  const skip = parseInt(req.query.skip) || 0;
+  
+  if (type !== 'movie' || id !== 'top') {
+    return res.status(404).json({ error: 'Catalog not found' });
+  }
+  
+  const metas = [
+    {
+      id: 'tt1254207',
+      type: 'movie',
+      name: 'Big Buck Bunny',
+      poster: 'https://image.tmdb.org/t/p/w500/example.jpg',
+      posterShape: 'poster',
+      description: 'A large rabbit escapes...',
+      releaseInfo: '2008',
+      runtime: '10 min'
+    },
+    // Add more movies...
+  ];
+  
+  res.json({
+    metas: metas.slice(skip, skip + 100)
+  });
+});
+```
+
+### Key Points
+
+<AccordionGroup>
+  <Accordion title="Pagination">
+    Use the `skip` parameter to implement pagination. Return up to 100 items per page.
+  </Accordion>
+  
+  <Accordion title="Required Fields">
+    Each meta must have `id`, `type`, and `name`. Other fields are optional but recommended.
+  </Accordion>
+  
+  <Accordion title="Poster Images">
+    Provide high-quality poster URLs. Use `posterShape` to indicate aspect ratio.
+  </Accordion>
+</AccordionGroup>
+
+## Step 3: Implement the Stream Resource
+
+Create an endpoint at `/stream/{type}/{id}.json`:
+
+```javascript stream-handler.js
+app.get('/stream/:type/:id.json', (req, res) => {
+  const { type, id } = req.params;
+  
+  if (type !== 'movie') {
+    return res.status(404).json({ error: 'Type not supported' });
+  }
+  
+  // Example: Big Buck Bunny
+  if (id === 'tt1254207') {
+    return res.json({
+      streams: [
+        {
+          url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+          name: '1080p',
+          description: 'High quality stream'
+        },
+        {
+          url: 'https://example.com/720p.mp4',
+          name: '720p',
+          description: 'Medium quality stream'
+        }
+      ]
+    });
+  }
+  
+  // No streams available
+  res.json({ streams: [] });
+});
+```
+
+### Stream Types
+
+<CardGroup cols={2}>
+  <Card title="Direct URL" icon="link">
+    ```json
+    {
+      "url": "https://example.com/video.mp4"
+    }
+    ```
+  </Card>
+  
+  <Card title="Torrent" icon="magnet">
+    ```json
+    {
+      "infoHash": "24c8...",
+      "fileIdx": 0
+    }
+    ```
+  </Card>
+  
+  <Card title="YouTube" icon="youtube">
+    ```json
+    {
+      "ytId": "dQw4w9WgXcQ"
+    }
+    ```
+  </Card>
+  
+  <Card title="External" icon="external-link">
+    ```json
+    {
+      "externalUrl": "https://..."
+    }
+    ```
+  </Card>
+</CardGroup>
+
+## Step 4: Add CORS Headers
+
+<Warning>
+CORS headers are required for web clients to access your addon.
+</Warning>
+
+```javascript cors-middleware.js
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  next();
+});
+```
+
+## Step 5: Test Your Addon
+
+### Local Testing
+
+1. Start your server:
+```bash
+node server.js
+```
+
+2. Test the manifest:
+```bash
+curl http://localhost:3000/manifest.json
+```
+
+3. Test a catalog:
+```bash
+curl http://localhost:3000/catalog/movie/top.json
+```
+
+4. Test streams:
+```bash
+curl http://localhost:3000/stream/movie/tt1254207.json
+```
+
+### Install in Stremio
+
+For local testing, use a tunneling service like [ngrok](https://ngrok.com):
+
+```bash
+ngrok http 3000
+```
+
+Then in Stremio:
+1. Go to Addons
+2. Click the puzzle icon (Community Addons)
+3. Paste your ngrok URL with `/manifest.json`
+4. Click Install
+
+## Complete Example
+
+Here's a minimal working addon server:
+
+```javascript server.js
+const express = require('express');
+const app = express();
+
+// CORS middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  next();
+});
+
+// Manifest
+app.get('/manifest.json', (req, res) => {
+  res.json({
+    id: 'com.example.movies',
+    version: '1.0.0',
+    name: 'Example Movies',
+    description: 'Free movie streams',
+    types: ['movie'],
+    resources: ['catalog', 'stream'],
+    catalogs: [
+      {
+        id: 'top',
+        type: 'movie',
+        name: 'Top Movies'
+      }
+    ]
+  });
+});
+
+// Catalog
+app.get('/catalog/:type/:id.json', (req, res) => {
+  res.json({
+    metas: [
+      {
+        id: 'tt1254207',
+        type: 'movie',
+        name: 'Big Buck Bunny',
+        poster: 'https://image.tmdb.org/t/p/w500/example.jpg'
+      }
+    ]
+  });
+});
+
+// Streams
+app.get('/stream/:type/:id.json', (req, res) => {
+  if (req.params.id === 'tt1254207') {
+    res.json({
+      streams: [
+        {
+          url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+          name: '1080p'
+        }
+      ]
+    });
+  } else {
+    res.json({ streams: [] });
+  }
+});
+
+app.listen(3000, () => {
+  console.log('Addon running on port 3000');
+});
+```
+
+## Advanced Features
+
+### Meta Resource
+
+Provide detailed information with episodes:
+
+```javascript
+app.get('/meta/:type/:id.json', (req, res) => {
+  res.json({
+    meta: {
+      id: 'tt0944947',
+      type: 'series',
+      name: 'Game of Thrones',
+      poster: 'https://example.com/poster.jpg',
+      description: 'Nine noble families fight...',
+      videos: [
+        {
+          id: 'tt0944947:1:1',
+          title: 'Winter Is Coming',
+          season: 1,
+          episode: 1,
+          released: '2011-04-17T00:00:00Z'
+        }
+      ]
+    }
+  });
+});
+```
+
+### Subtitles Resource
+
+```javascript
+app.get('/subtitles/:type/:id.json', (req, res) => {
+  res.json({
+    subtitles: [
+      {
+        id: 'en',
+        lang: 'eng',
+        url: 'https://example.com/subtitles/en.srt'
+      }
+    ]
+  });
+});
+```
+
+### Configuration
+
+For configurable addons:
+
+```json
+{
+  "behaviorHints": {
+    "configurable": true,
+    "configurationRequired": false
+  }
+}
+```
+
+Then use URL parameters:
+```
+https://example.com/{apiKey}/manifest.json
+```
+
+## Deployment
+
+<CardGroup cols={3}>
+  <Card title="Vercel" icon="triangle">
+    Deploy serverless Node.js addons
+  </Card>
+  
+  <Card title="Heroku" icon="cloud">
+    Deploy any language/framework
+  </Card>
+  
+  <Card title="Railway" icon="train">
+    Easy deployment with automatic HTTPS
+  </Card>
+</CardGroup>
+
+### Deployment Checklist
+
+<Steps>
+  <Step title="HTTPS Required">
+    Stremio requires HTTPS for production addons
+  </Step>
+  
+  <Step title="CORS Headers">
+    Ensure all endpoints return proper CORS headers
+  </Step>
+  
+  <Step title="Error Handling">
+    Return proper HTTP status codes and error messages
+  </Step>
+  
+  <Step title="Caching">
+    Implement cache headers to reduce server load
+  </Step>
+</Steps>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Performance">
+    - Cache responses when possible
+    - Use CDNs for images and static content
+    - Implement pagination for large catalogs
+    - Return empty arrays instead of errors when no content is available
+  </Accordion>
+  
+  <Accordion title="Error Handling">
+    - Return `{ streams: [] }` when no streams are available
+    - Return `{ metas: [] }` for empty catalogs
+    - Use appropriate HTTP status codes
+    - Log errors for debugging
+  </Accordion>
+  
+  <Accordion title="Content">
+    - Use high-quality poster images
+    - Provide accurate metadata
+    - Include descriptions and release information
+    - Use standard ID formats (IMDb, TMDB, etc.)
+  </Accordion>
+  
+  <Accordion title="Security">
+    - Validate all input parameters
+    - Rate limit your endpoints
+    - Don't expose API keys in responses
+    - Use HTTPS in production
+  </Accordion>
+</AccordionGroup>
+
+## Resources
+
+<CardGroup cols={2}>
+  <Card title="Official SDK" icon="github" href="https://github.com/Stremio/stremio-addon-sdk">
+    JavaScript/Node.js addon SDK
+  </Card>
+  
+  <Card title="Addon Examples" icon="code" href="https://github.com/Stremio/addon-helloworld">
+    Example addons and templates
+  </Card>
+  
+  <Card title="Testing Tool" icon="flask" href="https://stremio-addon-linter.netlify.app/">
+    Validate your addon manifest
+  </Card>
+  
+  <Card title="Community" icon="discord" href="https://discord.gg/stremio">
+    Get help from the community
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+- Explore the [manifest reference](/addons/manifest) for advanced configuration
+- Learn about different [stream sources](/addons/resources#stream-sources)
+- Implement [meta resources](/addons/resources#meta-resource) for detailed information
+- Add [subtitles support](/addons/resources#subtitles-resource)
+- Publish your addon to the community!

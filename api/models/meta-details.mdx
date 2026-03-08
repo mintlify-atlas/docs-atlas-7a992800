@@ -1,0 +1,397 @@
+---
+title: 'MetaDetails'
+description: 'Model for displaying detailed information about a meta item with streams and metadata'
+---
+
+## Overview
+
+The `MetaDetails` model manages the detailed view of a content item (movie, series, etc.). It loads metadata from addons, available streams, user's library state, watching progress, and rating information. This is the primary model for content details pages.
+
+## Structure
+
+### Fields
+
+<ResponseField name="selected" type="Option<Selected>">
+  Currently selected meta item and optional stream
+</ResponseField>
+
+<ResponseField name="meta_items" type="Vec<ResourceLoadable<MetaItem>>" required>
+  Meta item data loaded from all compatible addons
+</ResponseField>
+
+<ResponseField name="meta_streams" type="Vec<ResourceLoadable<Vec<Stream>>>" required>
+  Streams embedded in the meta item's videos
+</ResponseField>
+
+<ResponseField name="streams" type="Vec<ResourceLoadable<Vec<Stream>>>" required>
+  Streams loaded from stream addons
+</ResponseField>
+
+<ResponseField name="last_used_stream" type="Option<ResourceLoadable<Option<Stream>>>">
+  Recommended stream for binge watching based on user's history
+</ResponseField>
+
+<ResponseField name="library_item" type="Option<LibraryItem>">
+  Library entry for this meta item, if it exists
+</ResponseField>
+
+<ResponseField name="rating_info" type="Option<Loadable<RatingInfo, EnvError>>">
+  User's rating/like status for this item
+</ResponseField>
+
+<ResponseField name="watched" type="Option<WatchedBitField>">
+  Bitfield indicating which episodes have been watched
+</ResponseField>
+
+## Selected
+
+<CodeGroup>
+```rust Selected
+pub struct Selected {
+    pub meta_path: ResourcePath,
+    pub stream_path: Option<ResourcePath>,
+    pub guess_stream: bool,
+}
+```
+</CodeGroup>
+
+<ResponseField name="meta_path" type="ResourcePath" required>
+  Path to the meta resource (contains type and ID)
+</ResponseField>
+
+<ResponseField name="stream_path" type="Option<ResourcePath>">
+  Optional path to a specific video for loading streams
+</ResponseField>
+
+<ResponseField name="guess_stream" type="bool" required>
+  If `true` and `stream_path` is `None`, automatically determine which video to load streams for
+</ResponseField>
+
+### Stream Guessing
+
+When `guess_stream` is `true`:
+
+1. Wait for all meta item requests to complete
+2. Find first successfully loaded meta item
+3. Use `behavior_hints.default_video_id` if available
+4. Otherwise, if no videos exist, use `meta_item.id`
+5. If videos exist but no default, don't guess
+6. Update `stream_path` with guessed video ID
+7. Set `guess_stream` to `false`
+
+**Source**: `src/models/meta_details.rs:387`
+
+## Update Implementation
+
+Implements `UpdateWithCtx<E>` for state management:
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Load::MetaDetails">
+    Loads detailed information for a meta item:
+    - Loads meta items from all addons
+    - Loads streams if video is specified
+    - Loads library item if it exists
+    - Computes watched bitfield
+    - Loads rating info if supported
+    - Dismisses notifications for this item
+    - Syncs library item to cloud if authenticated
+    
+    **Source**: `src/models/meta_details.rs:71`
+  </Accordion>
+
+  <Accordion title="Action::Unload">
+    Clears all meta details state
+    
+    **Source**: `src/models/meta_details.rs:113`
+  </Accordion>
+
+  <Accordion title="Action::MetaDetails::MarkAsWatched">
+    Marks the entire item as watched or unwatched:
+    - Updates library item's `flagged_watched`
+    - For series, marks all episodes
+    - Sends update to library
+    
+    **Source**: `src/models/meta_details.rs:132`
+  </Accordion>
+
+  <Accordion title="Action::MetaDetails::MarkVideoAsWatched">
+    Marks a specific video (episode) as watched or unwatched:
+    - Updates watched bitfield
+    - Updates library item state
+    - Syncs to cloud
+    
+    **Source**: `src/models/meta_details.rs:143`
+  </Accordion>
+
+  <Accordion title="Action::MetaDetails::MarkSeasonAsWatched">
+    Marks all episodes in a season as watched or unwatched:
+    - Finds all videos for the season
+    - Updates watched bitfield for each
+    - Updates library item state
+    
+    **Source**: `src/models/meta_details.rs:156`
+  </Accordion>
+
+  <Accordion title="Action::MetaDetails::Rate">
+    Sends a rating (like/dislike) for the meta item:
+    - Only works for supported ID prefixes and types
+    - Requires authentication
+    - Updates rating_info on success
+    - Emits `Event::MetaItemRated`
+    
+    **Source**: `src/models/meta_details.rs:183`
+  </Accordion>
+
+  <Accordion title="Internal::ResourceRequestResult (meta)">
+    Processes meta resource responses:
+    - Updates meta_items with loaded data
+    - Triggers stream guessing if enabled
+    - Updates meta_streams from video streams
+    - Updates last_used_stream recommendation
+    - Updates library item
+    - Recomputes watched bitfield
+    
+    **Source**: `src/models/meta_details.rs:202`
+  </Accordion>
+
+  <Accordion title="Internal::ResourceRequestResult (stream)">
+    Processes stream resource responses:
+    - Updates streams with loaded data
+    - Updates last_used_stream recommendation
+    
+    **Source**: `src/models/meta_details.rs:242`
+  </Accordion>
+
+  <Accordion title="Internal::RatingGetStatusResult">
+    Processes rating status response:
+    - Updates rating_info with user's current rating
+    - Sets to Error if request failed
+    
+    **Source**: `src/models/meta_details.rs:259`
+  </Accordion>
+
+  <Accordion title="Internal::RatingSendResult">
+    Processes rating submission response:
+    - Updates rating_info with new status
+    - Emits `Event::MetaItemRated` on success
+    - Shows error event on failure
+    
+    **Source**: `src/models/meta_details.rs:275`
+  </Accordion>
+
+  <Accordion title="Internal::LibraryChanged">
+    Updates library item and watched state when library changes externally
+    
+    **Source**: `src/models/meta_details.rs:320`
+  </Accordion>
+
+  <Accordion title="Internal::ProfileChanged">
+    Reloads all data when profile changes (addons, auth):
+    - Reloads meta items from new addon set
+    - Reloads streams
+    - Updates rating info availability
+    
+    **Source**: `src/models/meta_details.rs:331`
+  </Accordion>
+</AccordionGroup>
+
+## Last Used Stream
+
+The model automatically determines the best stream for binge watching:
+
+<Steps>
+  <Step title="Find Previous Stream">
+    Look back through the last 30 videos to find a stored stream item
+  </Step>
+  
+  <Step title="Match Addon">
+    Find stream responses from the same addon (`stream_transport_url`)
+  </Step>
+  
+  <Step title="Find Stream">
+    Try to find exact match by source, then by binge group
+  </Step>
+  
+  <Step title="Return Recommendation">
+    Return the matched stream or None
+  </Step>
+</Steps>
+
+<Info>
+  This ensures users continue watching from the same source/quality when binge watching a series.
+</Info>
+
+**Source**: `src/models/meta_details.rs:641`
+
+## Rating Support
+
+Rating is only available for certain items:
+
+### Supported ID Prefixes
+
+Defined in `USER_LIKES_SUPPORTED_ID_PREFIXES`:
+- IMDb IDs (`tt...`)
+- Other configured prefixes
+
+### Supported Types
+
+Defined in `USER_LIKES_SUPPORTED_TYPES`:
+- `movie`
+- `series`
+- Other configured types
+
+**Source**: `src/models/meta_details.rs:477`
+
+## Library Sync
+
+When loading a meta item, the model syncs the library item to the cloud:
+
+<CodeGroup>
+```rust Library Sync
+fn library_item_sync(library_item: &Option<LibraryItem>, profile: &Profile) -> Effects {
+    match (library_item, profile.auth_key()) {
+        (Some(library_item), Some(auth_key)) => {
+            Effects::msg(Msg::Internal(Internal::LibrarySyncPlanResult(
+                DatastoreRequest {
+                    auth_key: auth_key.to_owned(),
+                    collection: LIBRARY_COLLECTION_NAME.to_owned(),
+                    command: DatastoreCommand::Meta {},
+                },
+                Ok((vec![library_item.id.to_owned()], vec![])),
+            )))
+            .unchanged()
+        }
+        _ => Effects::none().unchanged(),
+    }
+}
+```
+</CodeGroup>
+
+**Source**: `src/models/meta_details.rs:370`
+
+## Usage Example
+
+<CodeGroup>
+```rust Example: Load Movie Details
+use stremio_core::models::meta_details::{MetaDetails, Selected};
+use stremio_core::types::addon::ResourcePath;
+use stremio_core::runtime::UpdateWithCtx;
+
+let mut meta_details = MetaDetails::default();
+
+// Load movie details
+let selected = Selected {
+    meta_path: ResourcePath {
+        resource: "meta".to_string(),
+        r#type: "movie".to_string(),
+        id: "tt0111161".to_string(),  // The Shawshank Redemption
+        extra: vec![],
+    },
+    stream_path: None,
+    guess_stream: false,
+};
+
+let effects = meta_details.update(
+    &Msg::Action(Action::Load(ActionLoad::MetaDetails(selected))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Load Series with Auto-Guess Stream
+use stremio_core::models::meta_details::{MetaDetails, Selected};
+use stremio_core::types::addon::ResourcePath;
+
+let mut meta_details = MetaDetails::default();
+
+// Load series and automatically determine which episode to show streams for
+let selected = Selected {
+    meta_path: ResourcePath {
+        resource: "meta".to_string(),
+        r#type: "series".to_string(),
+        id: "tt0944947".to_string(),  // Game of Thrones
+        extra: vec![],
+    },
+    stream_path: None,
+    guess_stream: true,  // Will auto-select default or first episode
+};
+
+let effects = meta_details.update(
+    &Msg::Action(Action::Load(ActionLoad::MetaDetails(selected))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Mark Episode as Watched
+// Mark specific episode as watched
+let video_id = "tt0944947:1:1".to_string();  // S01E01
+
+let effects = meta_details.update(
+    &Msg::Action(Action::MetaDetails(ActionMetaDetails::MarkVideoAsWatched(
+        video_id,
+        true,  // Mark as watched
+    ))),
+    &ctx
+);
+
+// Mark entire season as watched
+let effects = meta_details.update(
+    &Msg::Action(Action::MetaDetails(ActionMetaDetails::MarkSeasonAsWatched(
+        1,     // Season 1
+        true,  // Mark as watched
+    ))),
+    &ctx
+);
+```
+</CodeGroup>
+
+<CodeGroup>
+```rust Example: Rate Content
+use stremio_core::types::rating::Rating;
+
+// Like the item
+let effects = meta_details.update(
+    &Msg::Action(Action::MetaDetails(ActionMetaDetails::Rate(
+        Some(Rating::Like)
+    ))),
+    &ctx
+);
+
+// Remove rating
+let effects = meta_details.update(
+    &Msg::Action(Action::MetaDetails(ActionMetaDetails::Rate(None))),
+    &ctx
+);
+```
+</CodeGroup>
+
+## State Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unloaded
+    Unloaded --> Loading: Action::Load::MetaDetails
+    Loading --> Ready: Meta + Streams Loaded
+    Ready --> Loading: Change Selection
+    Ready --> Unloaded: Action::Unload
+    Ready --> Ready: Mark Watched/Rate
+```
+
+## Events
+
+The model emits:
+
+- `Event::MetaItemRated { id }` - User rated the item
+- `Event::Error` - Rating or loading errors
+
+## See Also
+
+- [MetaItem](/api/types/meta-item) - Meta item structure
+- [Stream](/api/types/stream) - Stream structure
+- [LibraryItem](/api/types/library-item) - Library item structure
+- [Player](/api/models/player) - Player model for playback

@@ -1,0 +1,657 @@
+---
+title: 'Performance Optimization'
+description: 'Tips and techniques for optimizing Stremio Core performance, especially for WASM targets'
+---
+
+## Overview
+
+Stremio Core is designed to be cross-platform, including compilation to WebAssembly (WASM). This guide covers optimization techniques for reducing binary size, improving runtime performance, and minimizing memory usage.
+
+## WASM Binary Size Optimization
+
+WASM binaries can grow large, especially with extensive use of serialization. Here are strategies to keep them small.
+
+### Analyzing Binary Size
+
+Use `twiggy` to identify code size offenders:
+
+```bash
+cargo install twiggy
+wasm-pack build --target web --release
+twiggy top pkg/your_project_bg.wasm
+```
+
+See README.md:42
+
+**Example output:**
+```
+Shallow Bytes │ Shallow % │ Item
+───────────────┼────────────┼──────────────────────────────────────
+      524288 ┊    45.2% ┊ data[0]
+      112233 ┊     9.7% ┊ serde_json::ser::Serializer
+       89456 ┊     7.7% ┊ stremio_core::models::library
+```
+
+### Avoid Unnecessary Serialization
+
+<Warning>
+  Deriving `Serialize`/`Deserialize` on types that don't need it significantly increases binary size.
+</Warning>
+
+**Bad:**
+```rust
+// This struct is only used internally
+#[derive(Serialize, Deserialize, Clone)]
+struct InternalState {
+    cache: HashMap<String, Vec<u8>>,
+    counters: Vec<u64>,
+}
+```
+
+**Good:**
+```rust
+// Only derive what's needed
+#[derive(Clone)]
+struct InternalState {
+    cache: HashMap<String, Vec<u8>>,
+    counters: Vec<u64>,
+}
+
+// Separate serializable view
+#[derive(Serialize)]
+struct InternalStateView<'a> {
+    counter_sum: u64,
+    cache_size: usize,
+}
+
+impl InternalState {
+    fn to_view(&self) -> InternalStateView {
+        InternalStateView {
+            counter_sum: self.counters.iter().sum(),
+            cache_size: self.cache.len(),
+        }
+    }
+}
+```
+
+### Conditional Compilation
+
+Use feature flags to exclude heavy dependencies in WASM builds:
+
+```toml
+[features]
+default = []
+analytics = []  # Optional analytics
+deflate = ["stremio-official-addons/deflate"]  # Optional compression
+```
+
+See Cargo.toml:33
+
+```rust
+#[cfg(feature = "analytics")]
+pub mod analytics;
+
+#[cfg(feature = "analytics")]
+use crate::analytics::Analytics;
+```
+
+See src/lib.rs:17
+
+### Optimize Cargo Profile
+
+```toml
+[profile.release]
+opt-level = 's'        # Optimize for size
+lto = true             # Link-time optimization
+codegen-units = 1      # Better optimization (slower compile)
+strip = true           # Strip symbols
+panic = 'abort'        # Smaller panic handler
+```
+
+See Cargo.toml:10
+
+### Use wasm-opt
+
+Further optimize the WASM binary:
+
+```bash
+# Install from binaryen
+npm install -g binaryen
+
+# Optimize for size
+wasm-opt -Os -o output.wasm input.wasm
+
+# Optimize for speed and size
+wasm-opt -O3 -o output.wasm input.wasm
+```
+
+## Runtime Performance
+
+### Clone Smart, Not Hard
+
+The message-passing architecture requires cloning. Use smart pointers for large data:
+
+**Bad:**
+```rust
+#[derive(Clone)]
+struct CatalogPage {
+    items: Vec<MetaItem>,  // Cloned on every message!
+}
+```
+
+**Good:**
+```rust
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct CatalogPage {
+    items: Arc<Vec<MetaItem>>,  // Reference counted
+}
+```
+
+### Minimize Effect Allocations
+
+Reuse effect constructors:
+
+**Bad:**
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Load) => {
+            Effects::many(vec![
+                Effect::Msg(Box::new(Msg::Internal(Internal::Step1))),
+                Effect::Msg(Box::new(Msg::Internal(Internal::Step2))),
+            ])
+        }
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+**Good:**
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Load) => {
+            Effects::msgs(vec![
+                Msg::Internal(Internal::Step1),
+                Msg::Internal(Internal::Step2),
+            ])
+        }
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+See src/runtime/effects.rs:74
+
+### Use `.unchanged()` Appropriately
+
+Prevent unnecessary UI updates:
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Internal(Internal::CacheUpdate(data)) => {
+            // Update internal cache without UI notification
+            self.cache.insert(data.key.clone(), data.value.clone());
+            Effects::none().unchanged()
+        }
+        Msg::Action(Action::Load) => {
+            // This should trigger UI update
+            self.state = State::Loading;
+            Effects::future(/* ... */)
+        }
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+See src/runtime/effects.rs:82
+
+## Async and Futures
+
+### Prefer Concurrent Effects
+
+When effects are independent, use concurrent execution:
+
+```rust
+// Bad - Sequential
+let effect1 = Effects::future(EffectFuture::Sequential(
+    fetch_data1().boxed_env()
+));
+let effect2 = Effects::future(EffectFuture::Sequential(
+    fetch_data2().boxed_env()
+));
+
+// Good - Concurrent
+let effects = Effects::futures(vec![
+    EffectFuture::Concurrent(fetch_data1().boxed_env()),
+    EffectFuture::Concurrent(fetch_data2().boxed_env()),
+]);
+```
+
+See src/runtime/effects.rs:77
+
+### Batch Network Requests
+
+Combine multiple requests when possible:
+
+**Bad:**
+```rust
+for addon in addons {
+    let effect = fetch_catalog(addon).boxed_env();
+    runtime.dispatch(/* ... */);
+}
+```
+
+**Good:**
+```rust
+let futures = addons.iter().map(|addon| {
+    fetch_catalog(addon)
+});
+
+let combined = future::join_all(futures)
+    .map(|results| Msg::Internal(Internal::CatalogsLoaded(results)))
+    .boxed_env();
+
+Effects::future(EffectFuture::Concurrent(combined))
+```
+
+## Memory Management
+
+### Limit Collection Sizes
+
+Prevent unbounded growth:
+
+```rust
+const MAX_CACHE_SIZE: usize = 100;
+
+struct MyModel {
+    cache: HashMap<String, Data>,
+}
+
+impl MyModel {
+    fn add_to_cache(&mut self, key: String, data: Data) {
+        if self.cache.len() >= MAX_CACHE_SIZE {
+            // Simple LRU: remove oldest
+            if let Some(oldest_key) = self.cache.keys().next().cloned() {
+                self.cache.remove(&oldest_key);
+            }
+        }
+        self.cache.insert(key, data);
+    }
+}
+```
+
+### Clear Unused Data
+
+Clean up when unloading models:
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Unload) => {
+            // Clear large data structures
+            self.catalog.clear();
+            self.cache.clear();
+            self.items = vec![];
+            Effects::none()
+        }
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+### Use String Interning
+
+For frequently repeated strings:
+
+```rust
+use std::sync::Arc;
+use std::collections::HashMap;
+
+struct StringInterner {
+    map: HashMap<String, Arc<str>>,
+}
+
+impl StringInterner {
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        self.map
+            .entry(s.to_string())
+            .or_insert_with(|| Arc::from(s))
+            .clone()
+    }
+}
+
+// Use interned strings for IDs
+struct MetaItem {
+    id: Arc<str>,        // Interned
+    name: String,        // Not interned (unique)
+    type_: Arc<str>,     // Interned ("movie", "series", etc.)
+}
+```
+
+## Serialization Performance
+
+### Custom Serialization
+
+For hot paths, implement custom serialization:
+
+```rust
+use serde::ser::{Serialize, Serializer, SerializeStruct};
+
+struct FastSerialize {
+    id: String,
+    count: u32,
+    // Skip large field in serialization
+    #[serde(skip)]
+    cache: Vec<u8>,
+}
+
+impl Serialize for FastSerialize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("FastSerialize", 2)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("count", &self.count)?;
+        // Cache is skipped
+        state.end()
+    }
+}
+```
+
+### Avoid serde_json::Value
+
+Use typed structures instead of generic JSON:
+
+**Bad:**
+```rust
+use serde_json::Value;
+
+struct Response {
+    data: Value,  // Expensive to parse and serialize
+}
+```
+
+**Good:**
+```rust
+#[derive(Deserialize, Serialize)]
+struct ResponseData {
+    items: Vec<String>,
+    count: u32,
+}
+
+struct Response {
+    data: ResponseData,  // Type-safe and faster
+}
+```
+
+## Environment Optimizations
+
+### Batch Storage Operations
+
+**Bad:**
+```rust
+for item in items {
+    E::set_storage(&item.key, Some(&item.value)).await?;
+}
+```
+
+**Good:**
+```rust
+// Serialize once
+let batch = serde_json::to_value(&items)?;
+E::set_storage("items_batch", Some(&batch)).await?;
+```
+
+### Cache Network Responses
+
+```rust
+use std::time::{Duration, Instant};
+
+struct CachedResponse<T> {
+    data: T,
+    timestamp: Instant,
+    ttl: Duration,
+}
+
+impl<T> CachedResponse<T> {
+    fn is_valid(&self) -> bool {
+        self.timestamp.elapsed() < self.ttl
+    }
+}
+
+struct Model {
+    cache: HashMap<String, CachedResponse<Vec<MetaItem>>>,
+}
+
+impl Model {
+    fn fetch_with_cache(&mut self, key: &str) -> Effects {
+        if let Some(cached) = self.cache.get(key) {
+            if cached.is_valid() {
+                // Use cached data
+                return Effects::msg(Msg::Internal(
+                    Internal::LoadedFromCache(cached.data.clone())
+                ));
+            }
+        }
+        
+        // Fetch fresh data
+        Effects::future(EffectFuture::Concurrent(
+            fetch_data(key).boxed_env()
+        ))
+    }
+}
+```
+
+## Profiling
+
+### Native Profiling
+
+```bash
+# Install cargo-flamegraph
+cargo install flamegraph
+
+# Profile your app
+cargo flamegraph --bin your_app
+
+# Open flamegraph.svg to identify hot spots
+```
+
+### WASM Profiling
+
+Use browser DevTools:
+
+1. Open Chrome DevTools → Performance
+2. Record a profile
+3. Look for long-running JavaScript/WASM functions
+4. Optimize identified hot paths
+
+### Memory Profiling
+
+```bash
+# Install valgrind
+sudo apt-get install valgrind
+
+# Profile memory usage
+valgrind --tool=massif ./target/release/your_app
+ms_print massif.out.* | less
+```
+
+## Compilation Speed
+
+### Use Caching
+
+```toml
+# .cargo/config.toml
+[build]
+incremental = true
+```
+
+### Parallel Compilation
+
+```bash
+# Use all CPU cores
+export CARGO_BUILD_JOBS=$(nproc)
+cargo build --release
+```
+
+### Split Large Modules
+
+Break large modules into smaller files to enable better parallel compilation and caching.
+
+## Platform-Specific Optimizations
+
+### WASM-Specific
+
+```rust
+#[cfg(target_arch = "wasm32")]
+mod wasm_optimized {
+    // Use web APIs directly
+    use web_sys::Window;
+    
+    pub fn get_timestamp() -> f64 {
+        Window::performance()
+            .map(|p| p.now())
+            .unwrap_or(0.0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod wasm_optimized {
+    pub fn get_timestamp() -> f64 {
+        // Native implementation
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    }
+}
+```
+
+### Conditional Send
+
+Stremio Core uses conditional `Send` trait:
+
+```rust
+#[cfg(not(feature = "env-future-send"))]
+pub trait ConditionalSend {}
+impl<T> ConditionalSend for T {}
+
+#[cfg(feature = "env-future-send")]
+pub trait ConditionalSend: Send {}
+impl<T: Send> ConditionalSend for T {}
+```
+
+See src/runtime/env.rs:99 and src/runtime/env.rs:121
+
+<Warning>
+  Don't enable `env-future-send` for WASM targets - it will cause compilation errors.
+</Warning>
+
+See Cargo.toml:28
+
+## Benchmarking
+
+Create benchmarks to track performance:
+
+```rust
+// benches/model_update.rs
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use stremio_core::runtime::Model;
+
+fn benchmark_update(c: &mut Criterion) {
+    let mut model = MyModel::default();
+    let msg = Msg::Action(Action::Load(request));
+    
+    c.bench_function("model_update", |b| {
+        b.iter(|| {
+            let (effects, fields) = model.update(black_box(&msg));
+            black_box(effects);
+            black_box(fields);
+        });
+    });
+}
+
+criterion_group!(benches, benchmark_update);
+criterion_main!(benches);
+```
+
+```toml
+# Cargo.toml
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "model_update"
+harness = false
+```
+
+## Monitoring Production Performance
+
+Add performance markers:
+
+```rust
+use std::time::Instant;
+
+fn update(&mut self, msg: &Msg) -> Effects {
+    let start = Instant::now();
+    
+    let effects = match msg {
+        // ... handle messages
+    };
+    
+    let duration = start.elapsed();
+    if duration.as_millis() > 100 {
+        log::warn!("Slow update: {:?} took {:?}", msg, duration);
+    }
+    
+    effects
+}
+```
+
+## Best Practices Checklist
+
+<AccordionGroup>
+  <Accordion title="Binary Size">
+    - ✅ Run `twiggy` to analyze WASM bundle
+    - ✅ Only derive `Serialize`/`Deserialize` when needed
+    - ✅ Use feature flags for optional functionality
+    - ✅ Enable LTO and size optimizations
+  </Accordion>
+
+  <Accordion title="Runtime Performance">
+    - ✅ Use `Arc` for shared data
+    - ✅ Use `.unchanged()` for non-UI updates
+    - ✅ Prefer concurrent effects for independent operations
+    - ✅ Batch network requests
+  </Accordion>
+
+  <Accordion title="Memory">
+    - ✅ Limit collection sizes
+    - ✅ Clear data on unload
+    - ✅ Use string interning for repeated strings
+    - ✅ Profile memory usage regularly
+  </Accordion>
+
+  <Accordion title="Development">
+    - ✅ Enable incremental compilation
+    - ✅ Split large modules
+    - ✅ Use benchmarks to track performance
+    - ✅ Profile hot paths
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="State Management" icon="diagram-project" href="/advanced/state-management">
+    Learn about efficient state management patterns
+  </Card>
+  <Card title="Environment Trait" icon="globe" href="/core-concepts/environment">
+    Optimize environment implementations
+  </Card>
+</CardGroup>

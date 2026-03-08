@@ -1,0 +1,248 @@
+---
+title: Elm Architecture
+description: Understanding the Effect, Update, and Msg pattern in Stremio Core
+---
+
+Stremio Core is built on the Elm Architecture, a pattern for building reliable, maintainable applications using a unidirectional data flow.
+
+## Core Concepts
+
+The Elm Architecture has three main components:
+
+1. **Model**: The state of your application
+2. **Messages**: Events that describe state changes
+3. **Update**: A function that produces new state and effects
+
+## The Msg Type
+
+Messages are the only way to change state in Stremio Core. Every user interaction, API response, or timer event becomes a message:
+
+```rust
+pub enum Msg {
+    Action(Action),    // User actions
+    Internal(Internal), // Internal state changes
+    Event(Event),      // Events emitted to the UI
+}
+```
+
+### Action Messages
+
+Actions are dispatched by the application UI:
+
+```rust
+// src/runtime/msg/action.rs:113
+#[derive(Clone, Deserialize, Debug)]
+#[serde(tag = "action", content = "args")]
+pub enum ActionCtx {
+    Authenticate(AuthRequest),
+    Logout,
+    InstallAddon(Descriptor),
+    UpdateSettings(ProfileSettings),
+    AddToLibrary(MetaItemPreview),
+    // ...
+}
+```
+
+### Internal Messages
+
+Internal messages are used for state transitions that don't come from user actions:
+
+```rust
+Internal::CtxAuthResult(auth_request, result)
+Internal::ProfileChanged
+Internal::ResourceRequestResult(request, result)
+```
+
+### Event Messages
+
+Events are emitted to the UI to notify about important state changes:
+
+```rust
+Event::UserAuthenticated { auth_request }
+Event::UserLoggedOut { uid }
+Event::Error { error, source }
+```
+
+## The Update Trait
+
+The `Update` trait defines how models respond to messages:
+
+```rust
+// src/runtime/update.rs:18
+pub trait Update<E: Env> {
+    fn update(&mut self, msg: &Msg) -> Effects;
+}
+```
+
+Models that need access to the global context use `UpdateWithCtx`:
+
+```rust
+// src/runtime/update.rs:22
+pub trait UpdateWithCtx<E: Env> {
+    fn update(&mut self, msg: &Msg, ctx: &Ctx) -> Effects;
+}
+```
+
+### Update Implementation Example
+
+Here's how the `Ctx` model handles authentication:
+
+```rust
+// src/models/ctx/ctx.rs:110
+impl<E: Env + 'static> Update<E> for Ctx {
+    fn update(&mut self, msg: &Msg) -> Effects {
+        match msg {
+            Msg::Action(Action::Ctx(ActionCtx::Authenticate(auth_request))) => {
+                // Set loading state
+                self.status = CtxStatus::Loading(auth_request.to_owned());
+                // Return effect to perform authentication
+                Effects::one(authenticate::<E>(auth_request)).unchanged()
+            }
+            Msg::Action(Action::Ctx(ActionCtx::Logout)) => {
+                // Convert to internal message
+                Effects::msg(Msg::Internal(Internal::Logout(false))).unchanged()
+            }
+            // ...
+        }
+    }
+}
+```
+
+## Effects
+
+Effects represent asynchronous operations or additional messages to process:
+
+```rust
+// src/runtime/effects.rs:14
+pub enum Effect {
+    Msg(Box<Msg>),              // Immediate message
+    Future(EffectFuture),       // Async operation
+}
+
+pub enum EffectFuture {
+    Concurrent(Future),   // Run in parallel
+    Sequential(Future),   // Run in order
+}
+```
+
+### Creating Effects
+
+The `Effects` builder provides convenient methods:
+
+```rust
+// No effects, state changed
+Effects::none()
+
+// Single message effect
+Effects::msg(Msg::Event(Event::UserLoggedOut { uid }))
+
+// Multiple messages
+Effects::msgs(vec![msg1, msg2, msg3])
+
+// Async effect
+Effects::future(EffectFuture::Concurrent(fetch_data()))
+
+// Mark state as unchanged
+Effects::none().unchanged()
+
+// Combine multiple effects
+effect1.join(effect2).join(effect3)
+```
+
+### The unchanged() Method
+
+Effects track whether the model state changed:
+
+```rust
+// src/runtime/effects.rs:81
+pub fn unchanged(mut self) -> Self {
+    self.has_changed = false;
+    self
+}
+```
+
+When `has_changed` is `true`, the runtime emits a `NewState` event to notify the UI. Use `.unchanged()` when effects don't modify the model:
+
+```rust
+// State changed, notify UI
+self.status = CtxStatus::Loading(...);
+Effects::one(effect)
+
+// State unchanged, don't notify UI  
+Effects::one(effect).unchanged()
+```
+
+## Example: CatalogWithFilters Update
+
+Here's a complete example from the catalog model:
+
+```rust
+// src/models/catalog_with_filters.rs:155
+impl<E, T> UpdateWithCtx<E> for CatalogWithFilters<T>
+where
+    E: Env + 'static,
+    T: CatalogResourceAdapter + PartialEq,
+{
+    fn update(&mut self, msg: &Msg, ctx: &Ctx) -> Effects {
+        match msg {
+            Msg::Action(Action::Load(ActionLoad::CatalogWithFilters(selected))) => {
+                // Update selected filters
+                let selected_effects =
+                    selected_update::<T>(&mut self.selected, &self.selectable, selected);
+                
+                // Load catalog data
+                let catalog_effects = match self.selected.as_ref() {
+                    Some(selected) => catalog_update::<E, _>(
+                        &mut self.catalog,
+                        CatalogPageRequest::First,
+                        &selected.request,
+                    ),
+                    _ => Effects::none().unchanged(),
+                };
+                
+                // Update selectable options
+                let selectable_effects = selectable_update(
+                    &mut self.selectable,
+                    &self.selected,
+                    &self.catalog,
+                    &ctx.profile,
+                );
+                
+                // Combine all effects
+                selected_effects
+                    .join(catalog_effects)
+                    .join(selectable_effects)
+            }
+            // Handle other messages...
+        }
+    }
+}
+```
+
+## Benefits of This Pattern
+
+<CardGroup cols={2}>
+  <Card title="Predictability" icon="check">
+    All state changes go through update functions, making the data flow easy to trace.
+  </Card>
+  <Card title="Testability" icon="flask">
+    Update functions are pure (except for effects), making them easy to test.
+  </Card>
+  <Card title="Composability" icon="puzzle-piece">
+    Effects can be combined using `.join()`, making complex updates manageable.
+  </Card>
+  <Card title="Type Safety" icon="shield">
+    The compiler ensures all messages are handled correctly.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Models and State" icon="database" href="/concepts/models-and-state">
+    Learn how models manage application state
+  </Card>
+  <Card title="Effects and Runtime" icon="play" href="/concepts/effects-and-runtime">
+    Understand how effects are executed
+  </Card>
+</CardGroup>

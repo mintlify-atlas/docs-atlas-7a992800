@@ -1,0 +1,188 @@
+---
+title: "Library Types"
+description: "Library bucket and item types for managing user's media collection"
+---
+
+## Overview
+
+Library types manage the user's media collection including watched state, progress tracking, and metadata.
+
+## LibraryBucket
+
+Container for all library items belonging to a user.
+
+<ResponseField name="uid" type="UID" required>
+  User ID (Option&lt;UserId&gt;) - None if not authenticated
+</ResponseField>
+
+<ResponseField name="items" type="HashMap<String, LibraryItem>" required>
+  Map of library items keyed by item ID
+</ResponseField>
+
+### Methods
+
+#### `new(uid: UID, items: Vec<LibraryItem>) -> Self`
+Create a new library bucket from a user ID and list of items.
+
+#### `merge_bucket(&mut self, bucket: LibraryBucket)`
+Merge another library bucket into this one (only if UIDs match).
+
+#### `merge_items(&mut self, items: Vec<LibraryItem>)`
+Merge individual items into the library. Items are updated only if the new item has a newer `mtime`.
+
+#### `are_ids_in_recent(&self, ids: &[String]) -> bool`
+Check if all given IDs are in the most recent items.
+
+#### `split_items_by_recent(&self) -> (Vec<&LibraryItem>, Vec<&LibraryItem>)`
+Split items into recent and other items based on `LIBRARY_RECENT_COUNT`.
+
+## LibraryItem
+
+Represents a single item in the user's library.
+
+<ResponseField name="id" type="String" required>
+  Unique identifier (serialized as `_id`)
+</ResponseField>
+
+<ResponseField name="name" type="String" required>
+  Item name/title
+</ResponseField>
+
+<ResponseField name="type" type="String" required>
+  Content type (e.g., "movie", "series", "other")
+</ResponseField>
+
+<ResponseField name="poster" type="Option<Url>">
+  URL to the poster image
+</ResponseField>
+
+<ResponseField name="posterShape" type="PosterShape" default="Poster">
+  Shape of the poster (Square, Landscape, or Poster)
+</ResponseField>
+
+<ResponseField name="removed" type="bool" required>
+  Whether the item has been removed from the library
+</ResponseField>
+
+<ResponseField name="temp" type="bool" required>
+  Whether this is a temporary item
+</ResponseField>
+
+<ResponseField name="ctime" type="Option<DateTime<Utc>>">
+  Creation time (serialized as `_ctime`)
+</ResponseField>
+
+<ResponseField name="mtime" type="DateTime<Utc>" required>
+  Modification time (serialized as `_mtime`)
+</ResponseField>
+
+<ResponseField name="state" type="LibraryItemState" required>
+  Current state including watch progress
+</ResponseField>
+
+<ResponseField name="behaviorHints" type="MetaItemBehaviorHints" default="{}">
+  Behavior hints from metadata
+</ResponseField>
+
+### Methods
+
+#### `should_sync<E: Env + 'static>(&self) -> bool`
+Determine if this item should be synced with the server.
+
+#### `is_in_continue_watching(&self) -> bool`
+Check if this item should appear in continue watching.
+
+#### `progress(&self) -> f64`
+Calculate watch progress as a percentage (0-100).
+
+#### `watched(&self) -> bool`
+Check if the item has been watched.
+
+#### `should_pull_notifications(&self) -> bool`
+Determine if notifications should be pulled for this item. Returns true for:
+- Series (not movies or other)
+- Items without a default video ID
+- Non-removed, non-temporary items
+- Items with notifications enabled (`!no_notif`)
+
+#### `mark_as_watched<E: Env>(&mut self, is_watched: bool)`
+Mark the entire item as watched or unwatched.
+
+#### `mark_video_as_watched<E: Env>(&mut self, watched: &WatchedBitField, video: &Video, is_watched: bool)`
+Mark a specific video as watched/unwatched.
+
+#### `mark_videos_as_watched<E: Env>(&mut self, watched: &WatchedBitField, videos: Vec<&Video>, is_watched: bool)`
+Mark multiple videos as watched/unwatched.
+
+## LibraryItemState
+
+Tracks the current state of a library item.
+
+<ResponseField name="lastWatched" type="Option<DateTime<Utc>>">
+  Last time this item was watched. Updated when:
+  - Playing the item
+  - Marking as watched
+  - Marking a video as watched (if released date is more recent)
+</ResponseField>
+
+<ResponseField name="timeWatched" type="u64" required>
+  Total time watched in milliseconds
+</ResponseField>
+
+<ResponseField name="timeOffset" type="u64" required>
+  Current playback position in milliseconds
+</ResponseField>
+
+<ResponseField name="overallTimeWatched" type="u64" required>
+  Overall time watched in milliseconds
+</ResponseField>
+
+<ResponseField name="timesWatched" type="u32" required>
+  Number of times this item has been watched
+</ResponseField>
+
+<ResponseField name="flaggedWatched" type="u32" required>
+  Flag indicating a movie has been watched
+</ResponseField>
+
+<ResponseField name="duration" type="u64" required>
+  Total duration in milliseconds
+</ResponseField>
+
+<ResponseField name="videoId" type="Option<String>">
+  ID of the last video watched. For items without videos, this is either `behavior_hints.default_video_id` or the `meta.id`
+</ResponseField>
+
+<ResponseField name="watched" type="Option<WatchedField>">
+  Bitfield tracking which videos have been watched. None for items without videos.
+</ResponseField>
+
+<ResponseField name="noNotif" type="bool" default="false">
+  Whether to disable notifications for this item
+</ResponseField>
+
+### Methods
+
+#### `watched_bitfield(&self, videos: &[Video]) -> WatchedBitField`
+Construct a watched bitfield from the state and video list.
+
+## Related Types
+
+### PosterShape
+
+Enum defining poster aspect ratios:
+- `Square`: 1:1 aspect ratio
+- `Landscape`: Wide horizontal format
+- `Poster`: Standard poster format (default)
+
+### LibraryBucketRef
+
+A reference version of LibraryBucket for serialization.
+
+<ResponseField name="uid" type="&UID" required>
+  Reference to user ID
+</ResponseField>
+
+<ResponseField name="items" type="HashMap<&str, &LibraryItem>" required>
+  Map of item references
+</ResponseField>

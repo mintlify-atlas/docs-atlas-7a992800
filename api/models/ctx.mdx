@@ -1,0 +1,233 @@
+---
+title: 'Ctx'
+description: 'Core context model that manages the application state and user data'
+---
+
+## Overview
+
+The `Ctx` (Context) model is the central state management structure in Stremio Core. It maintains the user's profile, library, streams, notifications, and other essential application data. All state updates flow through this model using the Update pattern.
+
+## Structure
+
+### Fields
+
+<ResponseField name="profile" type="Profile" required>
+  User profile containing authentication, settings, and installed addons
+</ResponseField>
+
+<ResponseField name="library" type="LibraryBucket">
+  User's library of saved content items (movies, series, etc.)
+</ResponseField>
+
+<ResponseField name="notifications" type="NotificationsBucket" required>
+  Notifications for new episodes and content updates
+</ResponseField>
+
+<ResponseField name="streams" type="StreamsBucket">
+  Cached stream data and playback history
+</ResponseField>
+
+<ResponseField name="streaming_server_urls" type="ServerUrlsBucket">
+  URLs for streaming server endpoints
+</ResponseField>
+
+<ResponseField name="search_history" type="SearchHistoryBucket">
+  User's search history data
+</ResponseField>
+
+<ResponseField name="dismissed_events" type="DismissedEventsBucket">
+  Events that have been dismissed by the user
+</ResponseField>
+
+<ResponseField name="status" type="CtxStatus" required>
+  Current status of the context (Loading or Ready)
+</ResponseField>
+
+<ResponseField name="trakt_addon" type="Option<DescriptorLoadable>">
+  Optional Trakt addon descriptor for syncing watch history
+</ResponseField>
+
+<ResponseField name="notification_catalogs" type="Vec<ResourceLoadable<Vec<MetaItem>>>">
+  Catalogs from addons that support the `lastVideosIds` resource for notifications
+</ResponseField>
+
+<ResponseField name="events" type="Events" required>
+  Modal and notification events
+</ResponseField>
+
+## CtxStatus
+
+The context can be in one of two states:
+
+<CodeGroup>
+```rust CtxStatus
+pub enum CtxStatus {
+    Loading(AuthRequest),
+    Ready,
+}
+```
+</CodeGroup>
+
+- **Loading**: Context is authenticating with the provided `AuthRequest`
+- **Ready**: Context is ready for operations
+
+## Constructor
+
+### new()
+
+Creates a new `Ctx` instance with the provided buckets.
+
+<CodeGroup>
+```rust Constructor
+pub fn new(
+    profile: Profile,
+    library: LibraryBucket,
+    streams: StreamsBucket,
+    streaming_server_urls: ServerUrlsBucket,
+    notifications: NotificationsBucket,
+    search_history: SearchHistoryBucket,
+    dismissed_events: DismissedEventsBucket,
+) -> Self
+```
+</CodeGroup>
+
+## Update Implementation
+
+The `Ctx` implements the `Update<E>` trait to handle state changes through messages.
+
+### Supported Messages
+
+<AccordionGroup>
+  <Accordion title="Action::Ctx::Authenticate">
+    Initiates authentication with the provided `AuthRequest`. Sets status to `Loading` and triggers authentication flow.
+    
+    **Source**: `src/models/ctx/ctx.rs:113`
+  </Accordion>
+
+  <Accordion title="Action::Ctx::Logout">
+    Logs out the current user. Triggers `Internal::Logout` message.
+    
+    **Source**: `src/models/ctx/ctx.rs:117`
+  </Accordion>
+
+  <Accordion title="Internal::Logout">
+    Handles logout process:
+    - Deletes remote session if not already deleted
+    - Resets profile, library, streams, and all buckets
+    - Updates status to `Ready`
+    - Emits `Event::UserLoggedOut`
+    
+    **Source**: `src/models/ctx/ctx.rs:120`
+  </Accordion>
+
+  <Accordion title="Internal::CtxAuthResult">
+    Processes authentication result:
+    - Updates profile with auth credentials
+    - Loads user's addons and library items
+    - Handles locked addons or missing library errors
+    - Emits `Event::UserAuthenticated` on success
+    
+    **Source**: `src/models/ctx/ctx.rs:169`
+  </Accordion>
+
+  <Accordion title="All Other Messages">
+    Delegates to sub-update functions:
+    - `update_profile` - Profile changes
+    - `update_library` - Library changes
+    - `update_streams` - Stream changes
+    - `update_streaming_server_urls` - Server URL changes
+    - `update_trakt_addon` - Trakt addon changes
+    - `update_notifications` - Notification changes
+    - `update_search_history` - Search history changes
+    - `update_events` - Event changes
+    
+    **Source**: `src/models/ctx/ctx.rs:269`
+  </Accordion>
+</AccordionGroup>
+
+## Authentication Flow
+
+<Steps>
+  <Step title="Initiate Authentication">
+    User calls `Action::Ctx::Authenticate(auth_request)` with credentials
+  </Step>
+  
+  <Step title="Loading State">
+    Context status changes to `CtxStatus::Loading(auth_request)`
+  </Step>
+  
+  <Step title="API Requests">
+    Concurrent requests are made to:
+    - Authenticate user and get auth key
+    - Fetch user's addon collection
+    - Fetch user's library items from datastore
+  </Step>
+  
+  <Step title="Process Results">
+    On success:
+    - Profile is updated with auth credentials
+    - Addons are installed
+    - Library items are loaded
+    - Status changes to `Ready`
+    - `Event::UserAuthenticated` is emitted
+  </Step>
+</Steps>
+
+## Events
+
+The `Ctx` model emits the following events:
+
+- `Event::UserLoggedOut { uid }` - User has logged out
+- `Event::UserAuthenticated { auth_request }` - User successfully authenticated
+- `Event::UserAddonsLocked { addons_locked }` - User's addons are locked/unlocked
+- `Event::UserLibraryMissing { library_missing }` - User's library is missing
+- `Event::SessionDeleted { auth_key }` - Remote session was deleted
+- `Event::Error` - Various error events for locked addons or missing library
+
+## Error Handling
+
+<Warning>
+  Authentication can fail with:
+  - Invalid credentials
+  - Network errors
+  - Locked addon collection
+  - Missing library data
+  
+  The model emits appropriate error events but continues operating. Check `Event::Error` for authentication failures.
+</Warning>
+
+## Usage Example
+
+<CodeGroup>
+```rust Usage
+use stremio_core::models::ctx::Ctx;
+use stremio_core::runtime::Update;
+use stremio_core::runtime::msg::{Msg, Action, ActionCtx};
+use stremio_core::types::api::AuthRequest;
+
+// Create a new context
+let mut ctx = Ctx::new(
+    profile,
+    library,
+    streams,
+    streaming_server_urls,
+    notifications,
+    search_history,
+    dismissed_events,
+);
+
+// Authenticate
+let auth_request = AuthRequest::Login {
+    email: "user@example.com".to_string(),
+    password: "password".to_string(),
+};
+
+let effects = ctx.update(&Msg::Action(Action::Ctx(ActionCtx::Authenticate(auth_request))));
+```
+</CodeGroup>
+
+## See Also
+
+- [Profile](/api/types/profile) - User profile and settings
+- [LibraryBucket](/api/types/library) - Library data structure
+- [Update Pattern](/concepts/update-pattern) - State management pattern

@@ -1,0 +1,380 @@
+---
+title: Effects and Runtime
+description: Understanding the Runtime, Env trait, and effect handling in Stremio Core
+---
+
+The runtime is the execution engine that brings Stremio Core to life. It manages the event loop, executes effects, and coordinates updates across the application.
+
+## The Runtime
+
+The `Runtime` struct orchestrates the entire application:
+
+```rust
+// src/runtime/runtime.rs:28
+pub struct Runtime<E: Env, M: Model<E>> {
+    model: Arc<RwLock<M>>,
+    tx: Sender<RuntimeEvent<E, M>>,
+    env: PhantomData<E>,
+}
+```
+
+### Creating a Runtime
+
+```rust
+// src/runtime/runtime.rs:39
+impl<E, M> Runtime<E, M>
+where
+    E: Env + Send + 'static,
+    M: Model<E> + Send + Sync + 'static,
+{
+    pub fn new(
+        model: M,
+        effects: Vec<Effect>,
+        buffer: usize,
+    ) -> (Self, Receiver<RuntimeEvent<E, M>>) {
+        let (tx, rx) = channel(buffer);
+        let model = Arc::new(RwLock::new(model));
+        let runtime = Runtime {
+            model,
+            tx,
+            env: PhantomData,
+        };
+        runtime.handle_effects(effects, vec![]);
+        (runtime, rx)
+    }
+}
+```
+
+### Runtime Events
+
+The runtime emits events to notify the UI of state changes:
+
+```rust
+// src/runtime/runtime.rs:13
+pub enum RuntimeEvent<E: Env, M: Model<E>> {
+    NewState(Vec<M::Field>, M),  // State changed
+    CoreEvent(Event),             // Event for the UI
+}
+```
+
+## Dispatching Actions
+
+Applications send actions to the runtime via `dispatch()`:
+
+```rust
+// src/runtime/runtime.rs:57
+pub fn dispatch(&self, action: RuntimeAction<E, M>) {
+    let (effects, fields) = {
+        let mut model = self.model.write().expect("model write failed");
+        match action {
+            RuntimeAction {
+                field: Some(field),
+                action,
+            } => model.update_field(&Msg::Action(action), &field),
+            RuntimeAction { action, .. } => model.update(&Msg::Action(action)),
+        }
+    };
+    self.handle_effects(effects, fields);
+}
+```
+
+The dispatch flow:
+
+1. Acquire write lock on model
+2. Call model's `update()` method with the action
+3. Release lock and handle returned effects
+4. Emit `NewState` event if state changed
+
+## Effect Execution
+
+The runtime executes effects returned from updates:
+
+```rust
+// src/runtime/runtime.rs:79
+fn handle_effects(&self, effects: Vec<Effect>, fields: Vec<M::Field>) {
+    // Emit NewState event if fields changed
+    if !fields.is_empty() {
+        self.emit(RuntimeEvent::<E, M>::NewState(fields, model.to_owned()));
+    };
+    
+    // Execute each effect
+    effects
+        .into_iter()
+        .for_each(|effect| {
+            match effect {
+                Effect::Msg(msg) => {
+                    // Handle immediately
+                    runtime.handle_effect_output(*msg);
+                }
+                Effect::Future(EffectFuture::Sequential(future)) => {
+                    // Execute sequentially
+                    E::exec_sequential(future.then(|msg| async move {
+                        runtime.handle_effect_output(msg);
+                    }))
+                },
+                Effect::Future(EffectFuture::Concurrent(future)) => {
+                    // Execute concurrently
+                    E::exec_concurrent(future.then(|msg| async move {
+                        runtime.handle_effect_output(msg);
+                    }))
+                }
+            }
+        });
+}
+```
+
+### Effect Types
+
+<CardGroup cols={2}>
+  <Card title="Msg Effect" icon="message">
+    Immediately dispatches a message to the model
+  </Card>
+  <Card title="Sequential Future" icon="list">
+    Async operation that runs one at a time
+  </Card>
+  <Card title="Concurrent Future" icon="arrows-split-up-and-left">
+    Async operation that can run in parallel
+  </Card>
+</CardGroup>
+
+## The Env Trait
+
+The `Env` trait abstracts platform-specific operations, making Stremio Core portable:
+
+```rust
+// src/runtime/env.rs:139
+pub trait Env {
+    fn fetch<IN, OUT>(request: Request<IN>) -> TryEnvFuture<OUT>;
+    
+    fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>>;
+    fn set_storage<T>(key: &str, value: Option<&T>) -> TryEnvFuture<()>;
+    
+    fn exec_concurrent<F: Future<Output = ()> + ConditionalSend + 'static>(future: F);
+    fn exec_sequential<F: Future<Output = ()> + ConditionalSend + 'static>(future: F);
+    
+    fn now() -> DateTime<Utc>;
+    
+    fn flush_analytics() -> EnvFuture<'static, ()>;
+    fn analytics_context(ctx: &Ctx, streaming_server: &StreamingServer, path: &str) -> serde_json::Value;
+    
+    fn addon_transport(transport_url: &Url) -> Box<dyn AddonTransport>;
+}
+```
+
+### Platform Abstraction
+
+Different platforms implement `Env` differently:
+
+- **Desktop**: Uses native HTTP client, file system storage, tokio runtime
+- **Web**: Uses fetch API, localStorage, wasm-bindgen-futures
+- **Mobile**: Uses platform-specific APIs for each operation
+
+### Conditional Send
+
+The `ConditionalSend` trait handles the difference between single-threaded (WASM) and multi-threaded platforms:
+
+```rust
+// src/runtime/env.rs:113
+#[cfg(feature = "env-future-send")]
+pub trait ConditionalSend: Send {}
+
+#[cfg(not(feature = "env-future-send"))]
+pub trait ConditionalSend {}
+```
+
+## Creating Effects
+
+### Immediate Message Effect
+
+Return a message to be processed immediately:
+
+```rust
+Effects::msg(Msg::Internal(Internal::ProfileChanged))
+```
+
+### Async HTTP Request
+
+Fetch data from an API:
+
+```rust
+fn authenticate<E: Env + 'static>(auth_request: &AuthRequest) -> Effect {
+    let auth_api = APIRequest::Auth(auth_request.clone());
+
+    EffectFuture::Concurrent(
+        async {
+            let auth = fetch_api::<E, _, _, _>(&auth_api)
+                .await
+                .map_err(CtxError::from)
+                .and_then(|result| match result {
+                    APIResult::Ok(result) => Ok(result),
+                    APIResult::Err(error) => Err(CtxError::from(error)),
+                })
+                .map(|AuthResponse { key, user }| Auth { key, user })?;
+            
+            Ok(auth)
+        }
+        .map(|result| {
+            Msg::Internal(Internal::CtxAuthResult(auth_request, result))
+        })
+        .boxed_env(),
+    )
+    .into()
+}
+```
+
+### Storage Operation
+
+Persist data to storage:
+
+```rust
+Effects::future(EffectFuture::Sequential(
+    E::set_storage(PROFILE_STORAGE_KEY, Some(&profile))
+        .map(|result| match result {
+            Ok(_) => Msg::Internal(Internal::ProfileChanged),
+            Err(error) => Msg::Event(Event::Error { 
+                error: CtxError::from(error),
+                source: Box::new(Event::ProfileChanged),
+            }),
+        })
+        .boxed_env(),
+))
+```
+
+### Multiple Concurrent Operations
+
+Run multiple operations in parallel:
+
+```rust
+let (addon_result, library_result) = future::join(
+    fetch_addon_collection(),
+    fetch_library_items(),
+).await;
+```
+
+## Effect Output Handling
+
+When effects complete, they send messages back to the runtime:
+
+```rust
+// src/runtime/runtime.rs:109
+fn handle_effect_output(&self, msg: Msg) {
+    match msg {
+        Msg::Event(event) => {
+            // Emit to UI
+            self.emit(RuntimeEvent::CoreEvent(event));
+        }
+        Msg::Internal(_) => {
+            // Update model
+            let (effects, fields) =
+                self.model.write().expect("model write failed").update(&msg);
+            self.handle_effects(effects, fields);
+        }
+        Msg::Action(_) => {
+            panic!("effects are not allowed to resolve with action");
+        }
+    }
+}
+```
+
+<Warning>
+  Effects must resolve to `Event` or `Internal` messages, never `Action`. Actions can only come from the UI.
+</Warning>
+
+## Error Handling
+
+The `EnvError` type wraps platform errors:
+
+```rust
+// src/runtime/env.rs:19
+pub enum EnvError {
+    Fetch(String),
+    AddonTransport(String),
+    Serde(String),
+    StorageUnavailable,
+    StorageSchemaVersionDowngrade(u32, u32),
+    StorageSchemaVersionUpgrade(Box<EnvError>),
+    StorageReadError(String),
+    StorageWriteError(String),
+    Other(String),
+}
+```
+
+Effects should convert errors to events:
+
+```rust
+.map_err(CtxError::from)
+.map(|result| match result {
+    Ok(data) => Msg::Internal(Internal::Success(data)),
+    Err(error) => Msg::Event(Event::Error { 
+        error,
+        source: Box::new(Event::OperationName),
+    }),
+})
+```
+
+## Example: Complete Effect Flow
+
+Here's a complete example of loading catalog data:
+
+```rust
+// 1. User dispatches action
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Load(ActionLoad::CatalogWithFilters(selected)),
+});
+
+// 2. Model's update() creates effect
+let effects = catalog_update::<E, _>(
+    &mut self.catalog,
+    CatalogPageRequest::First,
+    &selected.request,
+);
+
+// 3. Effect makes HTTP request to addon
+Effects::future(EffectFuture::Concurrent(
+    fetch_resource::<E>(request)
+        .map(|result| {
+            Msg::Internal(Internal::ResourceRequestResult(request, result))
+        })
+        .boxed_env(),
+))
+
+// 4. Effect completes and sends Internal message
+Msg::Internal(Internal::ResourceRequestResult(request, Ok(response)))
+
+// 5. Model updates state with result
+self.catalog[0].content = Some(Loadable::Ready(items));
+
+// 6. Runtime emits NewState event
+RuntimeEvent::NewState(vec![Field::Catalog], model)
+
+// 7. UI re-renders with new data
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Concurrent for I/O" icon="bolt">
+    HTTP requests and storage operations should use `Concurrent` futures
+  </Card>
+  <Card title="Use Sequential for Order" icon="list-ol">
+    Use `Sequential` when operations must complete in order
+  </Card>
+  <Card title="Handle All Errors" icon="triangle-exclamation">
+    Convert errors to `Event::Error` messages for the UI
+  </Card>
+  <Card title="Keep Effects Pure" icon="flask">
+    Effects should not have side effects beyond what they describe
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Review the overall module structure
+  </Card>
+  <Card title="Models and State" icon="database" href="/concepts/models-and-state">
+    Learn how models manage state
+  </Card>
+</CardGroup>

@@ -1,0 +1,398 @@
+---
+title: WASM Bindings
+description: Guide to using stremio-core-web package for web applications
+---
+
+The `stremio-core-web` package provides WebAssembly bindings for Stremio Core, allowing you to use the full power of Stremio in web applications.
+
+## Overview
+
+The `stremio-core-web` package is published on npm as `@stremio/stremio-core-web` and serves as a bridge between the Rust-based stremio-core and JavaScript/TypeScript web applications.
+
+<Info>
+**Current Version**: 0.53.0  
+**Repository**: [github.com/Stremio/stremio-core](https://github.com/Stremio/stremio-core)
+</Info>
+
+## Installation
+
+<CodeGroup>
+```bash npm
+npm install @stremio/stremio-core-web
+```
+
+```bash yarn
+yarn add @stremio/stremio-core-web
+```
+
+```bash pnpm
+pnpm add @stremio/stremio-core-web
+```
+</CodeGroup>
+
+## Package Structure
+
+The package includes:
+
+- `stremio_core_web.js` - Main JavaScript bridge
+- `stremio_core_web_bg.wasm` - WebAssembly binary
+- `bridge.js` - Communication bridge
+- `worker.js` - Web Worker support
+
+## WebEnv Implementation
+
+The package provides a complete `Env` trait implementation for the web platform:
+
+<CodeGroup>
+```typescript Key Features
+// WebEnv implements:
+// - fetch() using Web Fetch API
+// - Storage using LocalStorage
+// - exec_concurrent/sequential using spawn_local
+// - now() using js_sys::Date
+// - Analytics integration
+```
+</CodeGroup>
+
+### Environment Methods
+
+The `WebEnv` implementation is located in `stremio-core-web/src/env.rs`:
+
+#### Network Operations
+
+```rust
+impl Env for WebEnv {
+    fn fetch<IN, OUT>(request: Request<IN>) -> TryEnvFuture<OUT> {
+        // Uses web_sys::WorkerGlobalScope::fetch_with_request
+        // Automatic JSON serialization/deserialization
+        // Error handling with detailed logging
+    }
+}
+```
+
+#### Storage Operations
+
+```rust
+fn get_storage<T>(key: &str) -> TryEnvFuture<Option<T>> {
+    // Uses local_storage_get_item JavaScript function
+    // Automatic JSON deserialization
+}
+
+fn set_storage<T: Serialize>(key: &str, value: Option<&T>) -> TryEnvFuture<()> {
+    // Uses local_storage_set_item/remove_item
+    // Automatic JSON serialization
+}
+```
+
+#### Analytics
+
+```rust
+fn analytics_context(
+    ctx: &Ctx,
+    streaming_server: &StreamingServer,
+    path: &str,
+) -> serde_json::Value {
+    // Includes:
+    // - app_type: "stremio-web"
+    // - app_version, server_version, shell_version
+    // - system_language, app_language
+    // - installation_id, visit_id
+    // - sanitized path
+}
+```
+
+## WebModel
+
+The package exports a `WebModel` that includes all Stremio models:
+
+<CodeGroup>
+```rust WebModel Structure
+#[derive(Model)]
+pub struct WebModel {
+    pub ctx: Ctx,
+    pub auth_link: Link<LinkAuthKey>,
+    pub data_export: DataExport,
+    pub continue_watching_preview: ContinueWatchingPreview,
+    pub board: CatalogsWithExtra,
+    pub discover: CatalogWithFilters<MetaItemPreview>,
+    pub library: LibraryWithFilters<NotRemovedFilter>,
+    pub continue_watching: LibraryWithFilters<ContinueWatchingFilter>,
+    pub calendar: Calendar,
+    pub search: CatalogsWithExtra,
+    pub local_search: LocalSearch,
+    pub meta_details: MetaDetails,
+    pub remote_addons: CatalogWithFilters<Descriptor>,
+    pub installed_addons: InstalledAddonsWithFilters,
+    pub addon_details: AddonDetails,
+    pub streaming_server: StreamingServer,
+    pub player: Player,
+}
+```
+</CodeGroup>
+
+### Creating a Model
+
+```rust
+let (model, effects) = WebModel::new(
+    profile,
+    library,
+    streams,
+    server_urls,
+    notifications,
+    search_history,
+    dismissed_events,
+);
+```
+
+### Getting State
+
+```rust
+let state = model.get_state(&WebModelField::Discover);
+// Returns JsValue that can be used in JavaScript
+```
+
+## Build Process
+
+The package uses a custom build process combining Rust and JavaScript tooling:
+
+### Build Script
+
+From `stremio-core-web/scripts/build.sh`:
+
+<CodeGroup>
+```bash Production Build
+#!/bin/sh
+set -ex
+MODE=${1:---release}
+wasm-pack build --no-typescript --no-pack --out-dir wasm_build $MODE --target web
+mv ./wasm_build/stremio_core_web_bg.wasm stremio_core_web_bg.wasm
+npx babel wasm_build/stremio_core_web.js --config-file ./.babelrc --out-file stremio_core_web.js
+npx babel src/bridge.js --config-file ./.babelrc --out-file bridge.js
+npx babel src/worker.js --config-file ./.babelrc --out-file worker.js
+```
+</CodeGroup>
+
+### Running Builds
+
+<CodeGroup>
+```bash Production
+npm run build
+# or
+./scripts/build.sh --release
+```
+
+```bash Development
+npm run build-dev
+# or
+./scripts/build.sh --dev
+```
+</CodeGroup>
+
+<Warning>
+Development builds include sensitive logging information. Use only for debugging.
+</Warning>
+
+### Development Workflow
+
+For active development with auto-recompilation:
+
+<Steps>
+  <Step title="Install cargo-watch">
+    ```bash
+    cargo install cargo-watch
+    # or with cargo-binstall
+    cargo binstall cargo-watch
+    ```
+  </Step>
+  
+  <Step title="Run wasm-watch">
+    ```bash
+    cargo wasm-watch
+    ```
+    
+    This watches for file changes and automatically recompiles, including when using local patches for stremio-core.
+  </Step>
+</Steps>
+
+## Features
+
+The package supports several Cargo features:
+
+<CodeGroup>
+```toml Cargo Features
+[features]
+default = ["std", "wasm"]
+
+std = []
+wasm = [
+    "env",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:gloo-utils",
+    "dep:tracing-wasm",
+    "dep:console_error_panic_hook",
+    "dep:js-sys",
+    "dep:web-sys",
+    "getrandom?/js"
+]
+env = [
+    "dep:http",
+    "dep:regex",
+    "dep:hex",
+    "dep:getrandom",
+    "dep:serde_path_to_error"
+]
+log-trace = []  # Enable TRACE level logging
+```
+</CodeGroup>
+
+## Web Worker Support
+
+The package includes Web Worker support for running Stremio Core in a separate thread:
+
+### worker.js
+
+Provides a worker interface that:
+- Runs stremio-core in a Web Worker context
+- Handles message passing between main thread and worker
+- Manages model state updates
+
+### bridge.js
+
+Provides a bridge between JavaScript and WASM:
+- Marshals data between JS and Rust
+- Handles async operations
+- Manages event dispatching
+
+## Events and Analytics
+
+The package tracks and emits various events:
+
+<CodeGroup>
+```rust Event Types
+pub enum WebEvent {
+    UIEvent(UIEvent),
+    CoreEvent(Box<Event>),
+    CoreAction(Box<Action>),
+}
+
+pub enum UIEvent {
+    LocationPathChanged { prev_path: String },
+    Search { query: String, responses_count: usize },
+    Share { url: String },
+    StreamClicked { stream: Box<Stream> },
+}
+```
+</CodeGroup>
+
+### Emitting Analytics
+
+```rust
+WebEnv::emit_to_analytics(&event, &model, path);
+```
+
+Analytics are batched and sent periodically (every 30 seconds by default).
+
+## Initialization
+
+Initialize the environment before using:
+
+<CodeGroup>
+```rust Initialization
+use stremio_core_web::env::WebEnv;
+
+// Initialize WebEnv (sets panic hook, enables logging, migrates storage)
+WebEnv::init().await?;
+```
+</CodeGroup>
+
+This performs:
+1. Storage schema migration
+2. Installation ID generation/retrieval
+3. Analytics timer setup
+4. Panic hook configuration
+
+## Serialization Models
+
+The package provides custom serialization for web:
+
+- `serialize_ctx` - Context serialization
+- `serialize_discover` - Discover page
+- `serialize_library` - Library data
+- `serialize_player` - Player state
+- `serialize_meta_details` - Meta details
+- `serialize_streaming_server` - Server info
+- And more...
+
+These ensure optimal data transfer between Rust and JavaScript.
+
+## Deep Links
+
+The package includes deep link extensions:
+
+```rust
+pub trait DeepLinksExt {
+    fn into_web_deep_links(self) -> Self;
+}
+```
+
+Implemented for:
+- `LibraryDeepLinks`
+- `DiscoverDeepLinks`
+- `CalendarDeepLinks`
+- `AddonsDeepLinks`
+- `MetaItemDeepLinks`
+- `VideoDeepLinks`
+- `StreamDeepLinks`
+
+## Publishing
+
+The package is automatically published to npm when a release is created:
+
+<Steps>
+  <Step title="Update versions">
+    Update version in `Cargo.toml`, `Cargo.lock`, `package.json`, and `package-lock.json`
+  </Step>
+  
+  <Step title="Commit and wait for CI">
+    Commit with version number as message (e.g., "0.53.0") and wait for CI to pass
+  </Step>
+  
+  <Step title="Create tag">
+    ```bash
+    git tag stremio-core-web-v0.53.0
+    git push origin stremio-core-web-v0.53.0
+    ```
+  </Step>
+  
+  <Step title="Create GitHub Release">
+    Create a release with the tag and title "stremio-core-web v0.53.0"
+  </Step>
+  
+  <Step title="Automatic publish">
+    CI automatically builds and publishes to npm registry
+  </Step>
+</Steps>
+
+## Browser Support
+
+The package is optimized for modern browsers:
+
+- Uses `--signext-lowering` for iOS 15+ Safari support
+- Babel transpilation for broader compatibility
+- Web Worker support for performance
+
+<Note>
+iOS 12 and iOS 14 Safari are not supported.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Trait" icon="gear" href="/integration/environment-trait">
+    Deep dive into the Env trait implementation
+  </Card>
+  <Card title="Native Apps" icon="desktop" href="/integration/native-apps">
+    Learn about native platform integration
+  </Card>
+</CardGroup>

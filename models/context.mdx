@@ -1,0 +1,270 @@
+---
+title: 'Context (Ctx)'
+description: 'The central application context managing user profile, library, notifications, and streams'
+icon: 'database'
+---
+
+## Overview
+
+The `Ctx` (Context) model is the central state container in Stremio Core. It manages all user-related data including authentication, library, notifications, streams, and application events.
+
+## Structure
+
+```rust
+pub struct Ctx {
+    pub profile: Profile,
+    pub library: LibraryBucket,
+    pub notifications: NotificationsBucket,
+    pub streams: StreamsBucket,
+    pub streaming_server_urls: ServerUrlsBucket,
+    pub search_history: SearchHistoryBucket,
+    pub dismissed_events: DismissedEventsBucket,
+    pub status: CtxStatus,
+    pub trakt_addon: Option<DescriptorLoadable>,
+    pub notification_catalogs: Vec<ResourceLoadable<Vec<MetaItem>>>,
+    pub events: Events,
+}
+```
+
+## Key Components
+
+### Profile
+
+Contains user authentication and settings:
+
+```rust
+pub struct Profile {
+    pub auth: Option<Auth>,
+    pub addons: Vec<Descriptor>,
+    pub addons_locked: bool,
+    pub settings: Settings,
+}
+```
+
+<Note>
+The `addons_locked` flag prevents overwriting user addons when API fetch fails and defaults to official addons are used.
+</Note>
+
+### LibraryBucket
+
+Manages the user's library of media items:
+
+```rust
+pub struct LibraryBucket {
+    pub uid: UID,
+    pub items: HashMap<String, LibraryItem>,
+}
+```
+
+**Methods:**
+- `new(uid: UID, items: Vec<LibraryItem>)` - Creates a new library bucket
+- `merge_bucket(&mut self, bucket: LibraryBucket)` - Merges another bucket
+- `merge_items(&mut self, items: Vec<LibraryItem>)` - Merges individual items
+- `are_ids_in_recent(&self, ids: &[String]) -> bool` - Checks if IDs are recent
+- `split_items_by_recent(&self) -> (Vec<&LibraryItem>, Vec<&LibraryItem>)` - Splits by recency
+
+### CtxStatus
+
+Tracks authentication state:
+
+```rust
+pub enum CtxStatus {
+    Loading(AuthRequest),
+    Ready,
+}
+```
+
+## Authentication Flow
+
+### Login
+
+<Steps>
+  <Step title="Initiate Authentication">
+    Send `Msg::Action(Action::Ctx(ActionCtx::Authenticate(auth_request)))`
+  </Step>
+  
+  <Step title="Loading State">
+    Context enters `CtxStatus::Loading` state
+  </Step>
+  
+  <Step title="Fetch User Data">
+    Parallel requests for:
+    - Authentication token
+    - Addon collection
+    - Library items from datastore
+  </Step>
+  
+  <Step title="Update State">
+    On success, updates profile, library, and returns to `CtxStatus::Ready`
+  </Step>
+</Steps>
+
+**Authentication Effect:**
+
+```rust:src/models/ctx/ctx.rs
+fn authenticate<E: Env + 'static>(auth_request: &AuthRequest) -> Effect {
+    EffectFuture::Concurrent(
+        async {
+            E::flush_analytics().await;
+            
+            // Fetch auth token
+            let auth = fetch_api::<E, _, _, _>(&auth_api).await?;
+            
+            // Parallel fetch addon collection and library
+            let (addons_result, library_items_result) = 
+                future::join(addon_collection_fut, datastore_library_fut).await;
+            
+            Ok(CtxAuthResponse {
+                auth,
+                addons_result,
+                library_items_result,
+            })
+        }
+    )
+}
+```
+
+### Logout
+
+<Steps>
+  <Step title="Send Logout Action">
+    `Msg::Action(Action::Ctx(ActionCtx::Logout))`
+  </Step>
+  
+  <Step title="Delete Session">
+    Calls API to delete server-side session
+  </Step>
+  
+  <Step title="Clear State">
+    Resets profile, library, streams, notifications, and all buckets
+  </Step>
+  
+  <Step title="Emit Event">
+    Fires `Event::UserLoggedOut { uid }`
+  </Step>
+</Steps>
+
+## Update Handlers
+
+The Ctx model coordinates updates across all sub-modules:
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Ctx(ActionCtx::Authenticate(auth_request))) => {
+            self.status = CtxStatus::Loading(auth_request.to_owned());
+            Effects::one(authenticate::<E>(auth_request)).unchanged()
+        }
+        Msg::Internal(Internal::Logout(deleted)) => {
+            // Update all buckets and clear state
+            let profile_effects = update_profile::<E>(...);
+            let library_effects = update_library::<E>(...);
+            let streams_effects = update_streams::<E>(...);
+            // Join all effects
+        }
+        _ => {
+            // Delegate to sub-update functions
+            profile_effects
+                .join(library_effects)
+                .join(streams_effects)
+                .join(notifications_effects)
+                // ...
+        }
+    }
+}
+```
+
+## Sub-Update Modules
+
+The Ctx delegates specific updates to specialized modules:
+
+| Module | File | Purpose |
+|--------|------|--------|
+| Profile | `update_profile.rs` | User auth and settings |
+| Library | `update_library.rs` | Library item management |
+| Notifications | `update_notifications.rs` | Notification handling |
+| Streams | `update_streams.rs` | Stream tracking |
+| Events | `update_events.rs` | Event management |
+| Search History | `update_search_history.rs` | Search tracking |
+| Streaming Server URLs | `update_streaming_server_urls.rs` | Server URL management |
+| Trakt Addon | `update_trakt_addon.rs` | Trakt integration |
+
+## Events
+
+Key events emitted by Ctx:
+
+```rust
+Event::UserAuthenticated { auth_request }
+Event::UserLoggedOut { uid }
+Event::UserAddonsLocked { addons_locked }
+Event::UserLibraryMissing { library_missing }
+Event::SessionDeleted { auth_key }
+Event::Error { error, source }
+```
+
+## Error Handling
+
+```rust
+pub enum CtxError {
+    API(APIError),
+    Env(EnvError),
+    Other(OtherError),
+}
+
+pub enum OtherError {
+    UserAddonsAreLocked,
+    UserLibraryIsMissing,
+    // ...
+}
+```
+
+<Warning>
+When authentication fails, Ctx emits an `Event::Error` with the source event included for context.
+</Warning>
+
+## Usage Example
+
+```rust
+use stremio_core::types::profile::AuthRequest;
+
+// Create authentication request
+let auth_request = AuthRequest {
+    type_: "Login".to_string(),
+    email: "user@example.com".to_string(),
+    password: "password".to_string(),
+};
+
+// Dispatch authentication action
+runtime.dispatch(Msg::Action(
+    Action::Ctx(ActionCtx::Authenticate(auth_request))
+));
+
+// Context will:
+// 1. Enter Loading state
+// 2. Fetch auth token, addons, and library
+// 3. Update profile and library buckets
+// 4. Return to Ready state
+// 5. Emit UserAuthenticated event
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="State Synchronization">
+    The Ctx automatically synchronizes library and profile changes to the remote API when authenticated. Updates are batched and deduplicated for efficiency.
+  </Accordion>
+  
+  <Accordion title="Error Recovery">
+    If addon fetch fails during authentication, the `addons_locked` flag prevents local addon changes from syncing to the API, preserving user data.
+  </Accordion>
+  
+  <Accordion title="Analytics Flushing">
+    Before authentication requests, analytics are flushed to ensure data is captured before potential app state changes.
+  </Accordion>
+</AccordionGroup>
+
+## Related Models
+
+- [Library](/models/library) - Library item management
+- [Player](/models/player) - Media playback
+- [StreamingServer](/models/streaming-server) - Server communication

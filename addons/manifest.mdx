@@ -1,0 +1,316 @@
+---
+title: Addon Manifest
+description: Complete reference for the Stremio addon manifest structure
+---
+
+## Overview
+
+The manifest is a JSON document that describes an addon's capabilities, metadata, and supported resources. It's served at the `/manifest.json` endpoint and must conform to the `Manifest` structure.
+
+## Manifest Structure
+
+### Required Fields
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the addon. Must be unique across all addons.
+  
+  Example: `"com.example.movies"`
+</ParamField>
+
+<ParamField path="version" type="semver::Version" required>
+  Semantic version of the addon following semver specification.
+  
+  Example: `"1.0.0"`
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Human-readable name displayed in the UI.
+  
+  Example: `"My Awesome Movies Addon"`
+</ParamField>
+
+<ParamField path="types" type="string[]" required>
+  List of content types supported by the addon.
+  
+  Common types: `movie`, `series`, `tv`, `channel`, `anime`
+  
+  <Warning>If this list is empty, the addon is considered to support no types.</Warning>
+</ParamField>
+
+<ParamField path="resources" type="ManifestResource[]" required>
+  Resources provided by the addon. Can be specified in short or full format.
+  
+  See [Resources](#resources) section below.
+</ParamField>
+
+### Optional Fields
+
+<ParamField path="contactEmail" type="string">
+  Email address for addon support or contact.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Brief description of what the addon provides.
+</ParamField>
+
+<ParamField path="logo" type="URL">
+  URL to the addon's logo image.
+</ParamField>
+
+<ParamField path="background" type="URL">
+  URL to a background image for the addon.
+</ParamField>
+
+<ParamField path="idPrefixes" type="string[]">
+  Globally supported ID prefixes (e.g., `["tt", "kitsu"]`).
+  
+  If specified, resources should only use prefixes from this list.
+</ParamField>
+
+<ParamField path="catalogs" type="ManifestCatalog[]">
+  List of catalogs provided by the addon.
+  
+  See [Catalogs](#catalogs) section below.
+</ParamField>
+
+<ParamField path="addonCatalogs" type="ManifestCatalog[]">
+  Catalogs that list other addons.
+</ParamField>
+
+<ParamField path="behaviorHints" type="ManifestBehaviorHints">
+  Hints about addon behavior and capabilities.
+  
+  See [Behavior Hints](#behavior-hints) section below.
+</ParamField>
+
+## Resources
+
+Resources can be defined in two formats:
+
+### Short Format
+
+Simply specify the resource name as a string:
+
+```json
+{
+  "resources": ["catalog", "meta", "stream", "subtitles"]
+}
+```
+
+This indicates the addon supports these resources for all types and ID prefixes defined globally in the manifest.
+
+### Full Format
+
+Specify resource-specific types and ID prefixes:
+
+```json
+{
+  "resources": [
+    {
+      "name": "catalog",
+      "types": ["movie", "series"],
+      "idPrefixes": ["tt"]
+    },
+    {
+      "name": "meta",
+      "types": ["movie"],
+      "idPrefixes": null
+    },
+    "stream"
+  ]
+}
+```
+
+<ParamField path="name" type="string" required>
+  Resource name: `catalog`, `meta`, `stream`, or `subtitles`
+</ParamField>
+
+<ParamField path="types" type="string[]">
+  Content types supported by this specific resource.
+  
+  Must be a subset of manifest-level `types`.
+</ParamField>
+
+<ParamField path="idPrefixes" type="string[]">
+  ID prefixes supported by this specific resource.
+  
+  If `null`, uses manifest-level `idPrefixes`.
+</ParamField>
+
+## Catalogs
+
+Catalogs define browsable content collections:
+
+```json
+{
+  "catalogs": [
+    {
+      "id": "top",
+      "type": "movie",
+      "name": "Top Movies",
+      "extra": [
+        {
+          "name": "genre",
+          "isRequired": false,
+          "options": ["Action", "Comedy", "Drama"],
+          "optionsLimit": 1
+        },
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the catalog.
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Content type for this catalog (e.g., `movie`, `series`).
+</ParamField>
+
+<ParamField path="name" type="string">
+  Display name for the catalog.
+</ParamField>
+
+<ParamField path="extra" type="ExtraProp[]">
+  Additional query parameters supported by the catalog.
+  
+  Can be specified in full or short format.
+</ParamField>
+
+### Extra Properties
+
+#### Full Format
+
+```json
+{
+  "extra": [
+    {
+      "name": "genre",
+      "isRequired": false,
+      "options": ["Action", "Comedy"],
+      "optionsLimit": 1
+    }
+  ]
+}
+```
+
+<ParamField path="name" type="string" required>
+  Parameter name (e.g., `genre`, `skip`, `search`).
+</ParamField>
+
+<ParamField path="isRequired" type="boolean" default={false}>
+  Whether this parameter must be provided in requests.
+</ParamField>
+
+<ParamField path="options" type="string[]" default={[]}>
+  List of valid values for this parameter.
+</ParamField>
+
+<ParamField path="optionsLimit" type="number" default={1}>
+  Maximum number of values that can be passed for this parameter.
+</ParamField>
+
+#### Short Format
+
+```json
+{
+  "extraSupported": ["genre", "skip"],
+  "extraRequired": ["search"]
+}
+```
+
+## Behavior Hints
+
+```json
+{
+  "behaviorHints": {
+    "adult": false,
+    "p2p": false,
+    "configurable": true,
+    "configurationRequired": false
+  }
+}
+```
+
+<ParamField path="adult" type="boolean" default={false}>
+  Whether the addon contains adult content.
+</ParamField>
+
+<ParamField path="p2p" type="boolean" default={false}>
+  Whether the addon uses peer-to-peer technology.
+</ParamField>
+
+<ParamField path="configurable" type="boolean" default={false}>
+  Whether the addon supports configuration.
+</ParamField>
+
+<ParamField path="configurationRequired" type="boolean" default={false}>
+  Whether configuration is required before using the addon.
+</ParamField>
+
+## Complete Example
+
+```json
+{
+  "id": "com.example.movies",
+  "version": "1.0.0",
+  "name": "Example Movies",
+  "description": "Provides movies and series metadata",
+  "logo": "https://example.com/logo.png",
+  "background": "https://example.com/bg.png",
+  "contactEmail": "support@example.com",
+  "types": ["movie", "series"],
+  "idPrefixes": ["tt"],
+  "resources": [
+    {
+      "name": "catalog",
+      "types": ["movie", "series"],
+      "idPrefixes": ["tt"]
+    },
+    "meta",
+    "stream"
+  ],
+  "catalogs": [
+    {
+      "id": "top",
+      "type": "movie",
+      "name": "Top Movies",
+      "extra": [
+        {
+          "name": "genre",
+          "options": ["Action", "Comedy", "Drama"]
+        },
+        {
+          "name": "skip"
+        }
+      ]
+    }
+  ],
+  "behaviorHints": {
+    "adult": false,
+    "p2p": false,
+    "configurable": false,
+    "configurationRequired": false
+  }
+}
+```
+
+## Validation
+
+Stremio Core validates manifests to ensure:
+
+- All required fields are present
+- Resource `types` are subsets of manifest `types`
+- Resource `idPrefixes` are subsets of manifest `idPrefixes` (when specified)
+- Catalog extra properties match supported/required lists
+- URLs are valid
+
+<Tip>
+Use the `is_resource_supported()` method to check if a resource path is supported by the manifest.
+</Tip>

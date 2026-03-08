@@ -1,122 +1,133 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Stremio Core",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#94cb04",
+    "light": "#545454",
+    "dark": "#94cb04"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png",
+  "logo": {
+    "light": "https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png",
+    "dark": "https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/Stremio/stremio-core"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Stremio/stremio-core"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/architecture",
+              "concepts/elm-architecture",
+              "concepts/models-and-state",
+              "concepts/effects-and-runtime"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Addon System",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "addons/overview",
+              "addons/manifest",
+              "addons/transport",
+              "addons/resources",
+              "addons/creating-addons"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Models",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "models/context",
+              "models/library",
+              "models/catalog",
+              "models/meta-details",
+              "models/player",
+              "models/streaming-server"
+            ]
+          },
+          {
+            "group": "Platform Integration",
+            "pages": [
+              "integration/environment-trait",
+              "integration/wasm-bindings",
+              "integration/native-apps"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/state-management",
+              "advanced/custom-models",
+              "advanced/analytics",
+              "advanced/optimization"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Types",
             "pages": [
-              "api-reference/introduction"
+              "api/types/addon",
+              "api/types/library",
+              "api/types/profile",
+              "api/types/resource",
+              "api/types/streams",
+              "api/types/notifications"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Runtime",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/runtime/runtime",
+              "api/runtime/env",
+              "api/runtime/effects",
+              "api/runtime/messages"
+            ]
+          },
+          {
+            "group": "Models API",
+            "pages": [
+              "api/models/ctx",
+              "api/models/catalog-with-filters",
+              "api/models/library-with-filters",
+              "api/models/meta-details",
+              "api/models/player",
+              "api/models/calendar"
+            ]
+          },
+          {
+            "group": "Addon Transport",
+            "pages": [
+              "api/addon-transport/http-transport",
+              "api/addon-transport/legacy-protocol"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

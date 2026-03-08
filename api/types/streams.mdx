@@ -1,0 +1,176 @@
+---
+title: "Streams Types"
+description: "Stream state tracking and management types"
+---
+
+## Overview
+
+Streams types manage the state of previously played streams including subtitle/audio preferences, playback speed, and player settings.
+
+## StreamsBucket
+
+Container for stream items with per-user storage.
+
+<ResponseField name="uid" type="UID" required>
+  User ID (Option&lt;UserId&gt;) - None if not authenticated
+</ResponseField>
+
+<ResponseField name="items" type="HashMap<StreamsItemKey, StreamsItem>" required>
+  Map of stream items keyed by meta ID and video ID
+</ResponseField>
+
+### Methods
+
+#### `new(uid: UID) -> Self`
+Create a new empty streams bucket for a user.
+
+#### `last_stream_item(&self, video_id: &str, meta_item: &MetaItem) -> Option<&StreamsItem>`
+Get the most recent stream item for a video. For series, searches up to 30 videos backwards to find a previously used stream.
+
+## StreamsItemKey
+
+Composite key for identifying stream items.
+
+<ResponseField name="metaId" type="String" required>
+  Meta item identifier
+</ResponseField>
+
+<ResponseField name="videoId" type="String" required>
+  Video identifier
+</ResponseField>
+
+## StreamsItem
+
+Stores information about a previously used stream.
+
+<ResponseField name="stream" type="Stream" required>
+  The stream that was played
+</ResponseField>
+
+<ResponseField name="type" type="String" required>
+  Content type (e.g., "movie", "series")
+</ResponseField>
+
+<ResponseField name="metaId" type="String" required>
+  Meta item ID
+</ResponseField>
+
+<ResponseField name="videoId" type="String" required>
+  Video ID
+</ResponseField>
+
+<ResponseField name="metaTransportUrl" type="Url" required>
+  URL of the addon that provided the meta
+</ResponseField>
+
+<ResponseField name="streamTransportUrl" type="Url" required>
+  URL of the addon that provided the stream
+</ResponseField>
+
+<ResponseField name="state" type="Option<StreamItemState>">
+  Saved playback state (subtitle/audio tracks, speeds, etc.)
+</ResponseField>
+
+<ResponseField name="mtime" type="DateTime<Utc>" required>
+  Modification time (serialized as `_mtime`)
+</ResponseField>
+
+### Methods
+
+#### `adjusted_state(&self, new_stream: &Stream) -> Option<StreamItemState>`
+
+Retrieve adjusted stream state based on the new stream:
+
+- **Same source**: Retain entire state (subtitle delay, audio delay, tracks, speed, player type)
+- **Same binge group**: Retain tracks, speed, and player type, but clear subtitle/audio delay
+- **Different source/group**: Retain only playback speed and player type
+
+This allows settings to persist appropriately when moving between episodes or different streams.
+
+## StreamItemState
+
+User-customized playback settings that persist across sessions.
+
+<ResponseField name="subtitleTrack" type="Option<SubtitleTrack>">
+  Selected subtitle track
+</ResponseField>
+
+<ResponseField name="subtitleDelay" type="Option<i64>">
+  Subtitle delay in milliseconds
+</ResponseField>
+
+<ResponseField name="subtitleSize" type="Option<f32>">
+  Subtitle size (platform-dependent units)
+</ResponseField>
+
+<ResponseField name="subtitleOffset" type="Option<f32>">
+  Vertical subtitle offset (platform-dependent units)
+</ResponseField>
+
+<ResponseField name="audioTrack" type="Option<AudioTrack>">
+  Selected audio track
+</ResponseField>
+
+<ResponseField name="audioDelay" type="Option<i64>">
+  Audio delay in milliseconds
+</ResponseField>
+
+<ResponseField name="playbackSpeed" type="Option<f32>">
+  Playback speed multiplier (e.g., 1.0 = normal, 1.5 = 1.5x speed)
+</ResponseField>
+
+<ResponseField name="playerType" type="Option<String>">
+  Player type override
+</ResponseField>
+
+## SubtitleTrack
+
+Selected subtitle track information.
+
+<ResponseField name="id" type="String" required>
+  Track identifier
+</ResponseField>
+
+<ResponseField name="embedded" type="bool" required>
+  Whether this is an embedded subtitle or addon subtitle
+</ResponseField>
+
+<ResponseField name="language" type="Option<String>">
+  Subtitle language. Used when playing next stream in same binge group to match tracks by language (in case IDs differ).
+</ResponseField>
+
+## AudioTrack
+
+Selected audio track information.
+
+<ResponseField name="id" type="String" required>
+  Track identifier
+</ResponseField>
+
+<ResponseField name="language" type="Option<String>">
+  Audio language. Used when playing next stream in same binge group to match tracks by language (in case IDs differ).
+</ResponseField>
+
+## State Persistence Strategy
+
+The streams bucket implements an intelligent state persistence strategy:
+
+### Same Source
+When the exact same stream is played again, **all state is preserved**:
+- Subtitle track, delay, size, and offset
+- Audio track and delay
+- Playback speed
+- Player type
+
+### Same Binge Group
+When moving to another video in the same binge group (e.g., next episode):
+- **Preserved**: Track selections (subtitle/audio), playback speed, player type
+- **Cleared**: Subtitle and audio delay (sync may differ between episodes)
+- **Track matching**: Uses language in addition to ID to handle cases where track order differs
+
+### Different Source/Group
+When playing a completely different stream:
+- **Preserved**: Only playback speed and player type
+- **Cleared**: All track-specific settings
+
+This ensures user preferences are maintained where appropriate while avoiding incorrect settings being applied to unrelated content.

@@ -1,0 +1,118 @@
+---
+title: "Notifications Types"
+description: "Notification bucket and item types for new episode alerts"
+---
+
+## Overview
+
+Notifications types track new episodes and videos for items in the user's library, extracted from addon responses.
+
+## NotificationsBucket
+
+Container for all notifications using the `lastVideos` resource from addons.
+
+<ResponseField name="uid" type="UID" default="None">
+  User ID (Option&lt;UserId&gt;) - None if not authenticated
+</ResponseField>
+
+<ResponseField name="items" type="HashMap<MetaItemId, HashMap<VideoId, NotificationItem>>" default="{}">
+  Nested map of notifications: meta item ID → video ID → notification item
+</ResponseField>
+
+<ResponseField name="lastUpdated" type="Option<DateTime<Utc>>">
+  Timestamp when notifications were last pulled from addons
+</ResponseField>
+
+<ResponseField name="created" type="DateTime<Utc>" required>
+  Timestamp when the notification bucket was initialized
+</ResponseField>
+
+### Methods
+
+#### `new<E: Env + 'static>(uid: UID, items: Vec<NotificationItem>) -> Self`
+
+Create a new notifications bucket from a user ID and list of notification items.
+
+**Behavior:**
+- Deduplicates items by meta ID and video ID
+- If duplicate video IDs exist for the same meta item, keeps the first occurrence
+- Initializes `last_updated` as None
+- Sets `created` to current timestamp
+
+## NotificationItem
+
+Represents a notification for a new video/episode.
+
+<ResponseField name="metaId" type="String" required>
+  Meta item identifier (type alias for String)
+</ResponseField>
+
+<ResponseField name="videoId" type="String" required>
+  Video identifier (type alias for String)
+</ResponseField>
+
+<ResponseField name="videoReleased" type="DateTime<Utc>" required>
+  When the video was released
+</ResponseField>
+
+## Usage
+
+Notifications are automatically pulled for library items that meet certain criteria (see `LibraryItem::should_pull_notifications`):
+
+- Item type is **not** "other" or "movie" (typically series)
+- No default video ID set in behavior hints
+- Item is not removed or temporary
+- Notifications are not disabled (`no_notif` is false)
+
+The notification system works by:
+
+1. Querying addons' `lastVideos` resource for items in the user's library
+2. Comparing released dates to determine which videos are new
+3. Storing notifications in the bucket keyed by meta ID and video ID
+4. Tracking when notifications were last updated
+
+### Example Structure
+
+```rust
+NotificationsBucket {
+    uid: Some(UserId("user123")),
+    items: {
+        "tt1234567": {  // Meta item ID (e.g., series)
+            "tt1234567:1:1": NotificationItem {  // Season 1, Episode 1
+                meta_id: "tt1234567",
+                video_id: "tt1234567:1:1",
+                video_released: DateTime<Utc>,
+            },
+            "tt1234567:1:2": NotificationItem {  // Season 1, Episode 2
+                meta_id: "tt1234567",
+                video_id: "tt1234567:1:2",
+                video_released: DateTime<Utc>,
+            },
+        },
+    },
+    last_updated: Some(DateTime<Utc>),
+    created: DateTime<Utc>,
+}
+```
+
+## Type Aliases
+
+### MetaItemId
+
+```rust
+pub type MetaItemId = String;
+```
+
+Type alias for meta item identifiers used throughout notification tracking.
+
+### VideoId
+
+```rust
+pub type VideoId = String;
+```
+
+Type alias for video identifiers used throughout notification tracking.
+
+## Related Types
+
+See [Library Types](/api/types/library) for `LibraryItem::should_pull_notifications()` which determines when notifications are pulled for an item.

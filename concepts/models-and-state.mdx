@@ -1,0 +1,325 @@
+---
+title: Models and State
+description: Understanding stateful models and how they work in Stremio Core
+---
+
+Models are the heart of Stremio Core's state management. Each model is a self-contained state machine that responds to messages and produces effects.
+
+## What is a Model?
+
+A model in Stremio Core is a struct that:
+
+1. Holds application state
+2. Implements the `Update` or `UpdateWithCtx` trait
+3. Responds to messages by updating state and returning effects
+
+```rust
+// src/runtime/update.rs:8
+pub trait Model<E: Env>: Clone {
+    type Field: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>);
+    fn update_field(&mut self, msg: &Msg, field: &Self::Field) -> (Vec<Effect>, Vec<Self::Field>);
+}
+```
+
+## Core Application Model: Ctx
+
+The `Ctx` model is the central state container that holds:
+
+```rust
+// src/models/ctx/ctx.rs:46
+pub struct Ctx {
+    pub profile: Profile,
+    pub library: LibraryBucket,
+    pub notifications: NotificationsBucket,
+    pub streams: StreamsBucket,
+    pub streaming_server_urls: ServerUrlsBucket,
+    pub search_history: SearchHistoryBucket,
+    pub dismissed_events: DismissedEventsBucket,
+    pub status: CtxStatus,
+    pub trakt_addon: Option<DescriptorLoadable>,
+    pub notification_catalogs: Vec<ResourceLoadable<Vec<MetaItem>>>,
+    pub events: Events,
+}
+```
+
+### Creating a Ctx Instance
+
+```rust
+// src/models/ctx/ctx.rs:80
+impl Ctx {
+    pub fn new(
+        profile: Profile,
+        library: LibraryBucket,
+        streams: StreamsBucket,
+        streaming_server_urls: ServerUrlsBucket,
+        notifications: NotificationsBucket,
+        search_history: SearchHistoryBucket,
+        dismissed_events: DismissedEventsBucket,
+    ) -> Self {
+        Self {
+            profile,
+            library,
+            streams,
+            streaming_server_urls,
+            search_history,
+            dismissed_events,
+            notifications,
+            trakt_addon: None,
+            notification_catalogs: vec![],
+            status: CtxStatus::Ready,
+            events: Events {
+                modal: Loadable::Loading,
+                notification: Loadable::Loading,
+            },
+        }
+    }
+}
+```
+
+## Feature Models
+
+Feature models handle specific parts of the application:
+
+### CatalogWithFilters
+
+Manages catalog browsing with type, catalog, and extra filters:
+
+```rust
+// src/models/catalog_with_filters.rs:127
+pub struct CatalogWithFilters<T> {
+    pub selected: Option<Selected>,     // Current filter selection
+    pub selectable: Selectable,         // Available filters
+    pub catalog: Catalog<T>,            // Loaded catalog pages
+}
+```
+
+**Key features:**
+- Generic over content type (MetaItemPreview, Descriptor, etc.)
+- Pagination support with lazy loading
+- Dynamic filter generation based on installed addons
+
+### MetaDetails
+
+Loads and displays detailed information about content:
+
+```rust
+pub struct MetaDetails {
+    pub selected: Option<Selected>,
+    pub meta_items: Vec<ResourceLoadable<MetaItem>>,
+    pub streams: StreamsResourceLoadable,
+    // ...
+}
+```
+
+### Player
+
+Manages video playback state:
+
+```rust
+pub struct Player {
+    pub selected: Option<Selected>,
+    pub library_item: LibraryItemDeepLinks,
+    pub meta_item: MetaItemDeepLinks,
+    pub next_video: Option<NextVideo>,
+    // ...
+}
+```
+
+## State Update Pattern
+
+Models follow a consistent update pattern:
+
+### 1. Match the Message
+
+```rust
+fn update(&mut self, msg: &Msg, ctx: &Ctx) -> Effects {
+    match msg {
+        Msg::Action(Action::Load(ActionLoad::CatalogWithFilters(selected))) => {
+            // Handle load action
+        }
+        Msg::Action(Action::Unload) => {
+            // Handle unload action
+        }
+        Msg::Internal(Internal::ResourceRequestResult(request, result)) => {
+            // Handle async result
+        }
+        _ => Effects::none().unchanged(),
+    }
+}
+```
+
+### 2. Update State
+
+```rust
+// Update the model's fields
+self.selected = Some(new_selection);
+self.catalog = vec![new_page];
+```
+
+### 3. Generate Effects
+
+```rust
+// Load data from addon
+let catalog_effects = catalog_update::<E, _>(
+    &mut self.catalog,
+    CatalogPageRequest::First,
+    &selected.request,
+);
+
+// Update derived state
+let selectable_effects = selectable_update(
+    &mut self.selectable,
+    &self.selected,
+    &self.catalog,
+    &ctx.profile,
+);
+
+// Combine effects
+catalog_effects.join(selectable_effects)
+```
+
+## Composing State Updates
+
+Complex models often delegate to helper functions:
+
+```rust
+// src/models/ctx/ctx.rs:269
+let profile_effects =
+    update_profile::<E>(&mut self.profile, &mut self.streams, &self.status, msg);
+let library_effects =
+    update_library::<E>(&mut self.library, &self.profile, &self.status, msg);
+let streams_effects = update_streams::<E>(&mut self.streams, &self.status, msg);
+
+profile_effects
+    .join(library_effects)
+    .join(streams_effects)
+```
+
+This keeps the main update function readable while allowing each subsystem to manage its own state.
+
+## Resource Loading Pattern
+
+Many models use the `ResourceLoadable` type to track async operations:
+
+```rust
+pub struct ResourceLoadable<T> {
+    pub request: ResourceRequest,
+    pub content: Option<Loadable<T, EnvError>>,
+}
+
+pub enum Loadable<T, E> {
+    Loading,
+    Ready(T),
+    Err(E),
+}
+```
+
+### Loading Resources
+
+```rust
+// src/models/catalog_with_filters.rs:274
+fn catalog_update<E, T>(
+    catalog: &mut Catalog<T>,
+    page_request: CatalogPageRequest,
+    request: &ResourceRequest,
+) -> Effects {
+    let mut page = ResourceLoadable {
+        request: request.to_owned(),
+        content: None,  // Will be set to Loading by resource_update
+    };
+    
+    let effects = resource_update_with_vector_content::<E, _>(
+        &mut page,
+        ResourceAction::ResourceRequested { request },
+    );
+    
+    match page_request {
+        CatalogPageRequest::First => *catalog = vec![page],
+        CatalogPageRequest::Next => catalog.extend(vec![page]),
+    };
+    
+    effects
+}
+```
+
+## Handling Async Results
+
+When effects complete, they send `Internal` messages back to the model:
+
+```rust
+Msg::Internal(Internal::ResourceRequestResult(request, result)) => {
+    self.catalog
+        .iter_mut()
+        .find(|page| page.request == *request)
+        .map(|page| {
+            resource_update_with_vector_content::<E, _>(
+                page,
+                ResourceAction::ResourceRequestResult { request, result },
+            )
+        })
+        .unwrap_or_else(|| Effects::none().unchanged())
+}
+```
+
+## State Persistence
+
+The `Ctx` model persists critical state to storage:
+
+```rust
+// Profile changes trigger storage update
+Effects::future(EffectFuture::Concurrent(
+    E::set_storage(PROFILE_STORAGE_KEY, Some(&self.profile))
+        .map(|_| Msg::Internal(Internal::ProfileChanged))
+        .boxed_env(),
+))
+```
+
+## Model Lifecycle
+
+<Steps>
+  <Step title="Load">
+    User dispatches `Action::Load(...)` with initial parameters
+  </Step>
+  <Step title="Initialize">
+    Model sets up state and generates initial effects
+  </Step>
+  <Step title="Process">
+    Effects execute and send results back via `Internal` messages
+  </Step>
+  <Step title="Update">
+    Model processes results and updates state
+  </Step>
+  <Step title="Unload">
+    User dispatches `Action::Unload` to clean up resources
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Single Responsibility" icon="bullseye">
+    Each model should handle one feature or concept
+  </Card>
+  <Card title="Immutable Messages" icon="lock">
+    Never mutate the message parameter in update functions
+  </Card>
+  <Card title="Pure Logic" icon="code">
+    Keep business logic in pure helper functions when possible
+  </Card>
+  <Card title="Effect Composition" icon="layer-group">
+    Use `.join()` to combine effects from different subsystems
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Elm Architecture" icon="arrows-rotate" href="/concepts/elm-architecture">
+    Review the Effect, Update, and Msg pattern
+  </Card>
+  <Card title="Effects and Runtime" icon="play" href="/concepts/effects-and-runtime">
+    Learn how the runtime executes effects
+  </Card>
+</CardGroup>

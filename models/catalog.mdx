@@ -1,0 +1,430 @@
+---
+title: 'Catalog'
+description: 'Browse and filter addon catalogs with dynamic extra properties'
+icon: 'grid'
+---
+
+## Overview
+
+The `CatalogWithFilters` model provides a unified interface for browsing addon catalogs with support for type filtering, catalog selection, custom extra properties, and pagination.
+
+## Structure
+
+```rust
+pub struct CatalogWithFilters<T> {
+    pub selected: Option<Selected>,
+    pub selectable: Selectable,
+    pub catalog: Catalog<T>,
+}
+
+pub type Catalog<T> = Vec<CatalogPage<T>>;
+pub type CatalogPage<T> = ResourceLoadable<Vec<T>>;
+```
+
+**Generic Types:**
+- `T: CatalogResourceAdapter` - Resource type (MetaItemPreview, DescriptorPreview, etc.)
+
+## Resource Adapters
+
+### MetaItemPreview
+
+Standard content catalog (movies, series):
+
+```rust
+impl CatalogResourceAdapter for MetaItemPreview {
+    fn resource() -> &'static str { "catalog" }
+    fn catalogs(manifest: &Manifest) -> &[ManifestCatalog] {
+        &manifest.catalogs
+    }
+    fn selectable_priority() -> SelectablePriority {
+        SelectablePriority::Type  // Filter by type first
+    }
+}
+```
+
+### DescriptorPreview & Descriptor
+
+Addon catalog:
+
+```rust
+impl CatalogResourceAdapter for DescriptorPreview {
+    fn resource() -> &'static str { "addon_catalog" }
+    fn catalogs(manifest: &Manifest) -> &[ManifestCatalog] {
+        &manifest.addon_catalogs
+    }
+    fn selectable_priority() -> SelectablePriority {
+        SelectablePriority::Catalog  // Filter by catalog first
+    }
+}
+```
+
+## Selection Models
+
+### Selected
+
+Current catalog selection:
+
+```rust
+pub struct Selected {
+    pub request: ResourceRequest,
+}
+
+pub struct ResourceRequest {
+    pub base: Url,           // Addon transport URL
+    pub path: ResourcePath,  // Resource path with extras
+}
+```
+
+### Selectable Options
+
+Provide UI-ready selection options:
+
+```rust
+pub struct Selectable {
+    pub types: Vec<SelectableType>,
+    pub catalogs: Vec<SelectableCatalog>,
+    pub extra: Vec<SelectableExtra>,
+    pub next_page: Option<SelectablePage>,
+}
+```
+
+**SelectableType:**
+
+```rust
+pub struct SelectableType {
+    pub r#type: String,      // "movie", "series", etc.
+    pub selected: bool,
+    pub request: ResourceRequest,
+}
+```
+
+**SelectableCatalog:**
+
+```rust
+pub struct SelectableCatalog {
+    pub catalog: String,     // Catalog display name
+    pub selected: bool,
+    pub request: ResourceRequest,
+}
+```
+
+**SelectableExtra:**
+
+```rust
+pub struct SelectableExtra {
+    pub name: String,
+    pub is_required: bool,
+    pub options: Vec<SelectableExtraOption>,
+}
+
+pub struct SelectableExtraOption {
+    pub value: Option<String>,
+    pub selected: bool,
+    pub request: ResourceRequest,
+}
+```
+
+## Extra Properties
+
+Addons can define custom filter properties:
+
+```json
+{
+  "catalogs": [{
+    "id": "top",
+    "type": "movie",
+    "extra": [
+      {
+        "name": "genre",
+        "isRequired": false,
+        "options": ["Action", "Comedy", "Drama"]
+      },
+      {
+        "name": "skip",
+        "isRequired": false,
+        "options": ["0", "100", "200"]
+      }
+    ]
+  }]
+}
+```
+
+### Skip Extra Property
+
+The `skip` extra is treated specially for pagination:
+
+```rust
+const SKIP_EXTRA_PROP: ExtraValue = ExtraValue {
+    name: "skip",
+    value: String::new(),
+};
+```
+
+<Note>
+The skip property is automatically managed by the model and removed from user-facing selections.
+</Note>
+
+## Pagination
+
+### Loading First Page
+
+```rust
+pub enum CatalogPageRequest {
+    First,  // Replace all pages
+    Next,   // Append to existing pages
+}
+```
+
+**First Page:**
+
+```rust:src/models/catalog_with_filters.rs
+fn catalog_update<E, T>(
+    catalog: &mut Catalog<T>,
+    page_request: CatalogPageRequest,
+    request: &ResourceRequest,
+) -> Effects {
+    let mut page = ResourceLoadable {
+        request: request.to_owned(),
+        content: None,
+    };
+    let effects = resource_update_with_vector_content::<E, _>(
+        &mut page,
+        ResourceAction::ResourceRequested { request },
+    );
+    
+    match page_request {
+        CatalogPageRequest::First => *catalog = vec![page],
+        CatalogPageRequest::Next => catalog.extend(vec![page]),
+    };
+    
+    effects
+}
+```
+
+### Next Page Calculation
+
+Next page is available when:
+1. Catalog manifest includes `skip` extra property
+2. All current pages have loaded successfully
+3. All pages contain items (not empty)
+
+```rust:src/models/catalog_with_filters.rs
+let next_page = manifest_catalog
+    .extra
+    .iter()
+    .find(|prop| prop.name == SKIP_EXTRA_PROP.name)
+    .and_then(|_| {
+        // Sum all page sizes
+        catalog
+            .iter()
+            .map(|page| {
+                page.content
+                    .as_ref()
+                    .and_then(|content| content.ready())
+                    .filter(|content| !content.is_empty())
+                    .map(|content| content.len())
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|sizes| sizes.into_iter().sum())
+    })
+    .map(|skip| SelectablePage {
+        request: ResourceRequest {
+            extra: selected.request.path.extra
+                .extend_one(&SKIP_EXTRA_PROP, Some(skip.to_string())),
+            // ...
+        },
+    });
+```
+
+## Actions
+
+### Load Catalog
+
+```rust
+Msg::Action(Action::Load(ActionLoad::CatalogWithFilters(selected)))
+```
+
+<Steps>
+  <Step title="Update Selection">
+    Sets or infers the selected catalog and filters
+  </Step>
+  
+  <Step title="Request First Page">
+    Creates a ResourceLoadable and dispatches addon request
+  </Step>
+  
+  <Step title="Update Selectables">
+    Rebuilds types, catalogs, and extra options based on installed addons
+  </Step>
+</Steps>
+
+### Load Next Page
+
+```rust
+Msg::Action(Action::CatalogWithFilters(ActionCatalogWithFilters::LoadNextPage))
+```
+
+Appends a new page request with updated `skip` value.
+
+### Unload
+
+```rust
+Msg::Action(Action::Unload)
+```
+
+Clears selection and catalog pages.
+
+## Selection Inference
+
+If no selection is provided, the model infers based on priority:
+
+**Type Priority (MetaItemPreview):**
+```rust
+selectable.types.first().map(|selectable_type| Selected {
+    request: selectable_type.request.to_owned(),
+})
+```
+
+**Catalog Priority (DescriptorPreview):**
+```rust
+selectable.catalogs.first().map(|selectable_catalog| Selected {
+    request: selectable_catalog.request.to_owned(),
+})
+```
+
+## Selectable Updates
+
+Selectables are recalculated when:
+- Profile changes (addons installed/removed)
+- Catalog loads or unloads
+- Selection changes
+
+### Building Selectable Types
+
+```rust:src/models/catalog_with_filters.rs
+let selectable_types = selectable_catalogs
+    .iter()
+    .map(|catalog| &catalog.request)
+    .filter(|request| matches_current_selection(request))
+    .unique_by(|request| &request.path.r#type)
+    .map(|request| SelectableType {
+        r#type: request.path.r#type.to_owned(),
+        selected: is_selected(&request),
+        request,
+    })
+    .sorted_by(|a, b| {
+        compare_with_priorities(
+            a.r#type.as_str(),
+            b.r#type.as_str(),
+            &TYPE_PRIORITIES
+        )
+    })
+    .rev()
+    .collect();
+```
+
+### Building Extra Options
+
+For each extra property in the selected catalog:
+
+```rust:src/models/catalog_with_filters.rs
+let selectable_extra = manifest_catalog
+    .extra
+    .iter()
+    .filter(|prop| prop.name != SKIP_EXTRA_PROP.name && !prop.options.is_empty())
+    .map(|prop| {
+        // Add "None" option if not required
+        let none_option = (!prop.is_required)
+            .then(|| SelectableExtraOption {
+                value: None,
+                selected: !current_request_has_this_extra(),
+                request: request_without_this_extra(),
+            });
+        
+        // Map each option
+        let options = prop.options
+            .iter()
+            .map(|value| SelectableExtraOption {
+                value: Some(value.to_owned()),
+                selected: current_request_matches(value),
+                request: request_with_this_value(value),
+            });
+        
+        SelectableExtra {
+            name: prop.name.to_owned(),
+            is_required: prop.is_required,
+            options: none_option.into_iter().chain(options).collect(),
+        }
+    })
+    .collect();
+```
+
+## Usage Example
+
+```rust
+use stremio_core::models::catalog_with_filters::CatalogWithFilters;
+use stremio_core::types::resource::MetaItemPreview;
+
+// Initialize catalog model
+let (mut catalog, effects) = CatalogWithFilters::<MetaItemPreview>::new(&ctx.profile);
+
+// Load top movies
+let request = ResourceRequest {
+    base: addon_url.clone(),
+    path: ResourcePath {
+        resource: "catalog".to_string(),
+        r#type: "movie".to_string(),
+        id: "top".to_string(),
+        extra: vec![],
+    },
+};
+
+runtime.dispatch(Msg::Action(
+    Action::Load(ActionLoad::CatalogWithFilters(Some(Selected { request })))
+));
+
+// Apply genre filter
+if let Some(genre_extra) = catalog.selectable.extra
+    .iter()
+    .find(|e| e.name == "genre") 
+{
+    if let Some(action_option) = genre_extra.options
+        .iter()
+        .find(|o| o.value.as_deref() == Some("Action")) 
+    {
+        runtime.dispatch(Msg::Action(
+            Action::Load(ActionLoad::CatalogWithFilters(
+                Some(Selected { request: action_option.request.clone() })
+            ))
+        ));
+    }
+}
+
+// Load next page
+if catalog.selectable.next_page.is_some() {
+    runtime.dispatch(Msg::Action(
+        Action::CatalogWithFilters(ActionCatalogWithFilters::LoadNextPage)
+    ));
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Type Priorities">
+    Content types are sorted by predefined priorities (movie, series, channel, tv) to provide consistent ordering across addons.
+  </Accordion>
+  
+  <Accordion title="Default Required Extras">
+    Catalogs must provide `default_required_extra()` values. Catalogs without defaults are filtered out of selectables.
+  </Accordion>
+  
+  <Accordion title="Skip Property Handling">
+    The skip extra is automatically stripped from user selections and managed internally for pagination.
+  </Accordion>
+</AccordionGroup>
+
+## Related Models
+
+- [MetaDetails](/models/meta-details) - Item details from catalog
+- [Context](/models/context) - Profile and addon management

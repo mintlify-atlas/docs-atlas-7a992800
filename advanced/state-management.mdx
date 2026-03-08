@@ -1,0 +1,403 @@
+---
+title: 'Advanced State Management'
+description: 'Advanced patterns for managing state in Stremio Core'
+---
+
+## Overview
+
+Stremio Core implements a sophisticated state management system inspired by the Elm architecture. The system is built around the concepts of **Models**, **Messages**, **Effects**, and **Runtime**, providing a predictable and type-safe way to handle application state.
+
+## Architecture Components
+
+### The Model Trait
+
+The `Model` trait is the core abstraction for stateful components. It defines how models respond to messages and produce effects:
+
+```rust
+use stremio_core::runtime::{Model, Env, Msg, Effect};
+
+pub trait Model<E: Env>: Clone {
+    type Field: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+    fn update(&mut self, msg: &Msg) -> (Vec<Effect>, Vec<Self::Field>);
+    fn update_field(&mut self, msg: &Msg, field: &Self::Field) -> (Vec<Effect>, Vec<Self::Field>);
+}
+```
+
+**Key points:**
+- `update()`: Processes a message and returns effects and changed fields
+- `update_field()`: Updates a specific field in response to a message
+- `Field`: An enum representing all updatable fields in the model
+
+See src/runtime/update.rs:8
+
+### Messages
+
+Messages represent all possible state changes in the application. There are three types:
+
+```rust
+pub enum Msg {
+    Action(Action),      // User actions
+    Internal(Internal),  // Internal state transitions
+    Event(Event),        // Events emitted to the UI
+}
+```
+
+See src/runtime/msg/msg.rs:4
+
+**Message flow:**
+1. **Actions**: Initiated by user interactions or external triggers
+2. **Internal**: Used for internal state machine transitions
+3. **Events**: Emitted to notify the UI layer of changes
+
+### Effects
+
+Effects represent side effects that should be executed in response to state changes:
+
+```rust
+pub enum Effect {
+    Msg(Box<Msg>),           // Immediate message
+    Future(EffectFuture),    // Async operation
+}
+
+pub enum EffectFuture {
+    Concurrent(Future),      // Execute concurrently
+    Sequential(Future),      // Execute sequentially
+}
+```
+
+See src/runtime/effects.rs:14
+
+**Effect patterns:**
+
+```rust
+use stremio_core::runtime::Effects;
+
+// No effects, state changed
+Effects::none()
+
+// Single immediate message
+Effects::msg(Msg::Internal(Internal::LoadComplete))
+
+// Single future effect
+Effects::future(EffectFuture::Concurrent(
+    fetch_data().boxed_env()
+))
+
+// Multiple effects
+Effects::many(vec![
+    Effect::Msg(Box::new(msg1)),
+    Effect::Future(future1),
+])
+
+// Combine effects
+effects1.join(effects2)
+
+// Mark as unchanged (no UI update)
+Effects::none().unchanged()
+```
+
+See src/runtime/effects.rs:49
+
+## Update Patterns
+
+### Basic Update Implementation
+
+For models that don't need context:
+
+```rust
+use stremio_core::runtime::{Update, Env, Msg, Effects};
+
+impl<E: Env + 'static> Update<E> for MyModel {
+    fn update(&mut self, msg: &Msg) -> Effects {
+        match msg {
+            Msg::Action(Action::Load(request)) => {
+                self.state = State::Loading;
+                Effects::future(EffectFuture::Concurrent(
+                    load_data::<E>(request.clone()).boxed_env()
+                ))
+            }
+            Msg::Internal(Internal::LoadComplete(data)) => {
+                self.state = State::Ready(data.clone());
+                self.data = Some(data.clone());
+                Effects::none()
+            }
+            _ => Effects::none().unchanged()
+        }
+    }
+}
+```
+
+See src/runtime/update.rs:18
+
+### Context-Aware Updates
+
+For models that need access to the user context (auth, addons, library):
+
+```rust
+use stremio_core::runtime::{UpdateWithCtx, Env, Msg, Effects};
+use stremio_core::models::ctx::Ctx;
+
+impl<E: Env + 'static> UpdateWithCtx<E> for MyModel {
+    fn update(&mut self, msg: &Msg, ctx: &Ctx) -> Effects {
+        match msg {
+            Msg::Action(Action::Load(request)) => {
+                // Access user profile
+                let addons = &ctx.profile.addons;
+                
+                // Check authentication
+                if ctx.profile.auth_key().is_none() {
+                    return Effects::none().unchanged();
+                }
+                
+                // Use context data
+                let effects = self.load_with_context(ctx, request);
+                effects
+            }
+            _ => Effects::none().unchanged()
+        }
+    }
+}
+```
+
+See src/runtime/update.rs:22
+
+## The Runtime System
+
+The `Runtime` handles effect execution and state propagation:
+
+```rust
+use stremio_core::runtime::{Runtime, RuntimeEvent};
+
+// Create runtime with initial model
+let (runtime, rx) = Runtime::<MyEnv, MyModel>::new(
+    model,
+    initial_effects,
+    buffer_size: 100
+);
+
+// Dispatch actions
+runtime.dispatch(RuntimeAction {
+    field: None,
+    action: Action::Load(request),
+});
+
+// Listen to events
+while let Some(event) = rx.next().await {
+    match event {
+        RuntimeEvent::NewState(fields, model) => {
+            // Update UI for changed fields
+        }
+        RuntimeEvent::CoreEvent(event) => {
+            // Handle core events
+        }
+    }
+}
+```
+
+See src/runtime/runtime.rs:34
+
+### Runtime Events
+
+```rust
+pub enum RuntimeEvent<E: Env, M: Model<E>> {
+    NewState(Vec<M::Field>, M),  // State changed
+    CoreEvent(Event),             // Core event emitted
+}
+```
+
+See src/runtime/runtime.rs:15
+
+## Advanced Patterns
+
+### Loadable State Pattern
+
+The `Loadable` enum represents async loading states:
+
+```rust
+pub enum Loadable<R, E> {
+    Loading,
+    Ready(R),
+    Err(E),
+}
+
+impl<R, E> Loadable<R, E> {
+    pub fn is_ready(&self) -> bool { /* ... */ }
+    pub fn is_loading(&self) -> bool { /* ... */ }
+    pub fn ready(&self) -> Option<&R> { /* ... */ }
+    pub fn map<U, F>(self, f: F) -> Loadable<U, E> { /* ... */ }
+}
+```
+
+See src/models/common/loadable.rs:5
+
+**Usage example:**
+
+```rust
+#[derive(Serialize, Clone)]
+struct CatalogModel {
+    items: Loadable<Vec<MetaItem>, String>,
+}
+
+impl<E: Env> Update<E> for CatalogModel {
+    fn update(&mut self, msg: &Msg) -> Effects {
+        match msg {
+            Msg::Action(Action::Load) => {
+                self.items = Loadable::Loading;
+                Effects::future(EffectFuture::Concurrent(
+                    fetch_catalog::<E>().boxed_env()
+                ))
+            }
+            Msg::Internal(Internal::CatalogResponse(result)) => {
+                self.items = result.clone().into();
+                Effects::none()
+            }
+            _ => Effects::none().unchanged()
+        }
+    }
+}
+```
+
+### Unchanged Effects
+
+Use `.unchanged()` to process messages without triggering UI updates:
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Internal(Internal::Cleanup) => {
+            // Internal cleanup that doesn't affect UI
+            self.internal_cache.clear();
+            Effects::none().unchanged()
+        }
+        _ => Effects::none()
+    }
+}
+```
+
+See src/runtime/effects.rs:82
+
+### Effect Composition
+
+Combine multiple effects with `.join()`:
+
+```rust
+fn update(&mut self, msg: &Msg) -> Effects {
+    let profile_effects = update_profile(&mut self.profile, msg);
+    let library_effects = update_library(&mut self.library, msg);
+    let notifications_effects = update_notifications(&mut self.notifications, msg);
+    
+    profile_effects
+        .join(library_effects)
+        .join(notifications_effects)
+}
+```
+
+See src/models/ctx/ctx.rs:129 and src/runtime/effects.rs:86
+
+## Concurrent vs Sequential Effects
+
+### Concurrent Effects
+
+Use for independent operations that can run in parallel:
+
+```rust
+Effects::future(EffectFuture::Concurrent(
+    fetch_user_data::<E>().boxed_env()
+))
+```
+
+See src/runtime/runtime.rs:101
+
+### Sequential Effects
+
+Use for operations that must complete in order:
+
+```rust
+Effects::future(EffectFuture::Sequential(
+    save_to_storage::<E>(data).boxed_env()
+))
+```
+
+See src/runtime/runtime.rs:97
+
+## State Persistence
+
+Integrate with the `Env` trait for storage:
+
+```rust
+use stremio_core::runtime::{Env, TryEnvFuture};
+
+fn save_state<E: Env>(state: &MyState) -> TryEnvFuture<()> {
+    E::set_storage("my_state_key", Some(state))
+}
+
+fn load_state<E: Env>() -> TryEnvFuture<Option<MyState>> {
+    E::get_storage::<MyState>("my_state_key")
+}
+
+// In your update implementation
+fn update(&mut self, msg: &Msg) -> Effects {
+    match msg {
+        Msg::Action(Action::Save) => {
+            Effects::future(EffectFuture::Sequential(
+                save_state::<E>(&self.state)
+                    .map(|_| Msg::Event(Event::StateSaved))
+                    .boxed_env()
+            ))
+        }
+        _ => Effects::none().unchanged()
+    }
+}
+```
+
+See src/runtime/env.rs:147
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep Models Focused">
+    Each model should have a single responsibility. Use composition to build complex state from simpler models.
+  </Accordion>
+
+  <Accordion title="Immutable Updates">
+    Treat state updates as immutable operations. Clone and replace rather than mutating deeply nested structures.
+  </Accordion>
+
+  <Accordion title="Use Type Safety">
+    Leverage Rust's type system to make invalid states unrepresentable. Use enums for state machines.
+  </Accordion>
+
+  <Accordion title="Handle All Message Types">
+    Always include a catch-all match arm that returns `Effects::none().unchanged()` for unhandled messages.
+  </Accordion>
+
+  <Accordion title="Avoid Side Effects in Update">
+    The `update` method should be pure. All side effects should be returned as `Effect` values.
+  </Accordion>
+</AccordionGroup>
+
+## Common Pitfalls
+
+<Warning>
+  **Don't forget `.unchanged()`** - If your update doesn't change observable state, mark effects as unchanged to avoid unnecessary UI updates.
+</Warning>
+
+<Warning>
+  **Effect ordering matters** - Use `Sequential` effects when order is important, `Concurrent` for independent operations.
+</Warning>
+
+<Warning>
+  **Clone smartly** - Use `Arc` for large shared data structures to avoid expensive clones in the message-passing system.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Custom Models" icon="puzzle-piece" href="/advanced/custom-models">
+    Learn how to create custom models with the Model trait
+  </Card>
+  <Card title="Environment Trait" icon="globe" href="/core-concepts/environment">
+    Understand the environment abstraction
+  </Card>
+</CardGroup>

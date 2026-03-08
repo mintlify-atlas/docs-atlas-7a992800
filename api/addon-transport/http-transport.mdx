@@ -1,0 +1,186 @@
+---
+title: 'HTTP Transport'
+description: 'HTTP-based addon transport implementation for Stremio Core'
+---
+
+## Overview
+
+The `AddonHTTPTransport` provides HTTP-based communication with Stremio addons. It supports both modern manifest-based addons and legacy protocol addons through automatic detection and routing.
+
+## Implementation
+
+The HTTP transport is defined in `src/addon_transport/http_transport/http_transport.rs` and implements the `AddonTransport` trait.
+
+### Structure
+
+```rust
+pub struct AddonHTTPTransport<E: Env> {
+    transport_url: Url,
+    env: PhantomData<E>,
+}
+```
+
+**Fields:**
+- `transport_url` - The base URL for the addon endpoint
+- `env` - Phantom data for the environment type parameter
+
+### Constructor
+
+```rust
+pub fn new(transport_url: Url) -> Self
+```
+
+Creates a new HTTP transport instance with the specified addon URL.
+
+**Parameters:**
+- `transport_url` - The base URL of the addon (must end with `/manifest.json` or `/stremio/v1`)
+
+**Example:**
+```rust
+let transport = AddonHTTPTransport::<MyEnv>::new(
+    Url::parse("https://example.com/manifest.json").unwrap()
+);
+```
+
+## Methods
+
+### Resource Requests
+
+```rust
+fn resource(&self, path: &ResourcePath) -> TryEnvFuture<ResourceResponse>
+```
+
+Requests a resource from the addon. The method automatically detects the protocol type and routes to the appropriate handler.
+
+**Protocol Detection:**
+- If URL ends with `/stremio/v1` - routes to legacy protocol
+- If URL ends with `/manifest.json` - uses modern protocol
+- Otherwise - returns error
+
+**Modern Protocol URL Format:**
+
+The transport constructs URLs in the following format:
+
+```
+/{resource}/{type}/{id}.json
+```
+
+Or with extra parameters:
+
+```
+/{resource}/{type}/{id}/{extra}.json
+```
+
+**URL Encoding:**
+- All path components are percent-encoded using `URI_COMPONENT_ENCODE_SET`
+- Extra properties are encoded using `query_params_encode`
+
+**Example Request:**
+```rust
+let path = ResourcePath {
+    resource: "stream".to_string(),
+    r#type: "movie".to_string(),
+    id: "tt1254207".to_string(),
+    extra: vec![],
+};
+
+let response = transport.resource(&path).await?;
+```
+
+This generates a request to:
+```
+https://example.com/stream/movie/tt1254207.json
+```
+
+### Manifest Requests
+
+```rust
+fn manifest(&self) -> TryEnvFuture<Manifest>
+```
+
+Fetches the addon manifest from the transport URL.
+
+**Behavior:**
+- For modern addons: directly fetches from `transport_url`
+- For legacy addons: routes to `AddonLegacyTransport`
+
+**Example:**
+```rust
+let manifest = transport.manifest().await?;
+println!("Addon: {} v{}", manifest.name, manifest.version);
+```
+
+## Special Features
+
+### Cinemeta Catalog URL Override
+
+The transport supports overriding the Cinemeta addons catalog URL for testing or custom deployments.
+
+**Environment Variable:**
+```bash
+CINEMETA_ADDONS_CATALOG_URL=https://custom-cinemeta.example.com/catalog
+```
+
+**Behavior:**
+- When requesting `addon_catalog/all/community.json` from the official Cinemeta URL
+- The transport replaces it with the custom URL if the environment variable is set
+- Logs a warning message with the URL replacement details
+
+**Implementation:**
+```rust
+if url.contains(&*CINEMETA_ADDONS_CATALOG_URL) {
+    let new_url = current_url.replace(&*CINEMETA_ADDONS_CATALOG_URL, &replace_url);
+    tracing::warn!("Custom cinemeta addons catalog url will be used");
+}
+```
+
+## Error Handling
+
+<Warning>
+  The transport validates that URLs end with the correct path suffix. Invalid URLs will result in an `EnvError::AddonTransport` error.
+</Warning>
+
+**Common Errors:**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "addon http transport url must ends with /manifest.json" | URL doesn't have correct suffix | Ensure transport URL ends with `/manifest.json` or `/stremio/v1` |
+| Network errors | Connection failures | Check network connectivity and addon availability |
+| Deserialization errors | Invalid response format | Verify addon returns valid JSON in expected format |
+
+## Protocol Selection
+
+The transport automatically selects the appropriate protocol based on the URL:
+
+<CodeGroup>
+```rust Modern Protocol
+// URL ending with /manifest.json uses modern protocol
+let url = Url::parse("https://addon.example.com/manifest.json")?;
+let transport = AddonHTTPTransport::<E>::new(url);
+// Uses direct HTTP requests to resource endpoints
+```
+
+```rust Legacy Protocol
+// URL ending with /stremio/v1 uses legacy protocol
+let url = Url::parse("https://addon.example.com/stremio/v1")?;
+let transport = AddonHTTPTransport::<E>::new(url);
+// Routes through AddonLegacyTransport with JSON-RPC
+```
+</CodeGroup>
+
+## Source Reference
+
+- Main implementation: `src/addon_transport/http_transport/http_transport.rs`
+- Legacy adapter: `src/addon_transport/http_transport/legacy/mod.rs`
+- Transport trait: `src/addon_transport/addon_transport.rs`
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Legacy Protocol" icon="clock-rotate-left" href="./legacy-protocol">
+    Learn about legacy addon protocol support
+  </Card>
+  <Card title="Addon Transport Trait" icon="plug" href="../addon-transport">
+    Core transport interface definition
+  </Card>
+</CardGroup>
