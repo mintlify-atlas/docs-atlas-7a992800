@@ -1,0 +1,142 @@
+{
+  "projectType": "framework",
+  "projectName": "Stremio Core",
+  "projectDescription": "A Rust framework providing the core logic, types, and addon system for building Stremio media center applications across all platforms.",
+  "theme": "aspen",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/elm-architecture",
+              "concepts/models-and-state",
+              "concepts/effects-and-runtime"
+            ]
+          },
+          {
+            "group": "Addon System",
+            "pages": [
+              "addons/overview",
+              "addons/manifest",
+              "addons/transport",
+              "addons/resources",
+              "addons/creating-addons"
+            ]
+          },
+          {
+            "group": "Models",
+            "pages": [
+              "models/context",
+              "models/library",
+              "models/catalog",
+              "models/meta-details",
+              "models/player",
+              "models/streaming-server"
+            ]
+          },
+          {
+            "group": "Platform Integration",
+            "pages": [
+              "integration/environment-trait",
+              "integration/wasm-bindings",
+              "integration/native-apps"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/state-management",
+              "advanced/custom-models",
+              "advanced/analytics",
+              "advanced/optimization"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Types",
+            "pages": [
+              "api/types/addon",
+              "api/types/library",
+              "api/types/profile",
+              "api/types/resource",
+              "api/types/streams",
+              "api/types/notifications"
+            ]
+          },
+          {
+            "group": "Runtime",
+            "pages": [
+              "api/runtime/runtime",
+              "api/runtime/env",
+              "api/runtime/effects",
+              "api/runtime/messages"
+            ]
+          },
+          {
+            "group": "Models API",
+            "pages": [
+              "api/models/ctx",
+              "api/models/catalog-with-filters",
+              "api/models/library-with-filters",
+              "api/models/meta-details",
+              "api/models/player",
+              "api/models/calendar"
+            ]
+          },
+          {
+            "group": "Addon Transport",
+            "pages": [
+              "api/addon-transport/http-transport",
+              "api/addon-transport/legacy-protocol"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Elm-inspired architecture with Effect and Update traits",
+    "Comprehensive addon system with manifest and transport protocols",
+    "Stateful models for Context, Library, Catalog, Player, and more",
+    "Environment abstraction for cross-platform compatibility",
+    "WASM bindings for web integration via stremio-core-web",
+    "Type-safe resource requests and responses",
+    "Built-in analytics and event tracking",
+    "Streaming server integration with torrent support"
+  ],
+  "publicApiSurface": [
+    "types::addon::{Manifest, Descriptor, ResourceRequest, ResourceResponse}",
+    "types::library::{LibraryBucket, LibraryItem}",
+    "types::profile::{Profile, Auth, Settings}",
+    "types::resource::{MetaItem, MetaItemPreview, Video, Stream}",
+    "types::streams::{StreamsBucket, StreamItemState}",
+    "runtime::{Runtime, Env, Effect, Update, Model}",
+    "runtime::msg::{Action, Event, Msg}",
+    "models::ctx::Ctx",
+    "models::catalog_with_filters::CatalogWithFilters",
+    "models::meta_details::MetaDetails",
+    "models::player::Player",
+    "models::library_with_filters::LibraryWithFilters",
+    "models::streaming_server::StreamingServer",
+    "addon_transport::{AddonTransport, HttpTransport}"
+  ]
+}
